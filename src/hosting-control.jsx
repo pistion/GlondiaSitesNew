@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ICN } from './icons';
 import { Badge, Empty, StatusBadge, Tabs } from './components';
+import { uploadManualReceipt, createPaypalOrder, capturePaypalOrder } from './api/payments.js';
 
 // Render Hosting Hub owns live-site controls: logs, settings, env vars,
 // secret files, headers, routes, disks, domains, billing, and lifecycle actions.
@@ -186,7 +187,7 @@ export function HostingDetail({ id, navigate }) {
     {tab === 'Rules' && <RulesTab deploymentId={deploymentId} />}
     {tab === 'Disks' && <DisksTab app={merged} deploymentId={deploymentId} />}
     {tab === 'Domains' && <DomainsTab app={merged} deploymentId={deploymentId} />}
-    {tab === 'Billing' && <BillingTab deploymentId={deploymentId} />}
+    {tab === 'Billing' && <BillingTab deploymentId={deploymentId} app={merged} onReload={load} />}
   </>;
 }
 
@@ -880,11 +881,112 @@ function LiveLogsPanel({ deploymentId, compact = false }) {
   return <div className="card"><div className="row between" style={{ marginBottom: 10 }}><h2 style={{ margin: 0, fontSize: compact ? 14 : 18 }}>{compact ? 'Live logs' : 'Build Logs'}</h2><Badge tone={connState === 'live' ? 'success' : connState === 'error' ? 'danger' : 'muted'} dot={connState === 'live'}>{connState}</Badge></div>{streamStatus && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}><Badge tone={streamStatus.status === 'live' ? 'success' : streamStatus.status === 'failed' ? 'danger' : 'muted'} dot={false}>{streamStatus.currentStep || streamStatus.status || 'Preparing'}</Badge></div>}<div className="term" style={{ maxHeight: compact ? 220 : 520, overflowY: 'auto' }}>{lines.length === 0 && <div><span className="dim">No log lines yet.</span></div>}{lines.map((log, i) => <div key={log.id || i} style={{ display: 'flex', gap: 8, lineHeight: 1.5 }}><span className="ts" style={{ flexShrink: 0 }}>{formatTime(log.timestamp || log.createdAt)}</span><span className="dim" style={{ flexShrink: 0 }}>[{log.source === 'render' ? 'render' : 'sys'}]</span><span className={log.level === 'error' ? 'err' : log.level === 'warn' ? 'warn' : log.source === 'render' ? '' : 'dim'}>{log.message || log.msg}</span></div>)}<div ref={bottomRef} /></div></div>;
 }
 
-function BillingTab({ deploymentId }) {
-  const [billing, setBilling] = useState(null); const [loading, setLoading] = useState(true); const [fetchError, setFetchError] = useState('');
-  useEffect(() => { setFetchError(''); getHostingPaymentStatus(deploymentId).then(setBilling).catch((e) => setFetchError(e.message || 'Could not load billing status.')).finally(() => setLoading(false)); }, [deploymentId]);
-  if (loading) return <div className="card" style={{ padding: 36 }}><Empty icon="CreditCard" title="Loading billing status..." /></div>;
-  return <div className="card"><h2 style={{ marginTop: 0 }}>Billing status</h2>{fetchError && <div style={{ color: 'var(--danger)', marginBottom: 12 }}>{fetchError}</div>}<div className="kv"><dt>Status</dt><dd><Badge tone={billing?.paid ? 'success' : 'warn'}>{billing?.paymentStatus || 'pending'}</Badge></dd><dt>Grace period</dt><dd>{billing?.hoursRemaining != null ? `${billing.hoursRemaining} hours remaining` : 'Not calculated'}</dd><dt>Deadline</dt><dd>{billing?.deadlineAt ? new Date(billing.deadlineAt).toLocaleString() : 'Pending'}</dd></div></div>;
+function hoursRemaining(dueAt) {
+  if (!dueAt) return null;
+  const ms = new Date(dueAt).getTime() - Date.now();
+  return Math.max(0, Math.round((ms / 3_600_000) * 10) / 10);
+}
+
+// Deploy-first K100 billing: shows status + grace deadline, and lets the owner
+// pay by PayPal (card via PayPal) or upload a bank receipt for admin approval.
+function BillingTab({ deploymentId, app = {}, onReload }) {
+  const paymentStatus = app.paymentStatus || 'pending';
+  const orderId = app.checkoutOrderId || null;
+  const paid = paymentStatus === 'paid';
+  const expired = paymentStatus === 'expired' || app.status === 'payment_expired';
+  const remaining = hoursRemaining(app.billingDueAt);
+
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [file, setFile] = useState(null);
+  const fileRef = useRef(null);
+
+  const refresh = () => { onReload && onReload(); };
+
+  const handlePaypal = async () => {
+    if (!orderId) { setError('No billing order is attached to this deployment yet.'); return; }
+    setBusy('paypal'); setError(''); setNotice('');
+    try {
+      const order = await createPaypalOrder(orderId);
+      if (order?.alreadyPaid) { setNotice('This deployment is already paid.'); refresh(); return; }
+      if (order?.approvalUrl) {
+        // Open PayPal approval in a new tab; capture is completed on return.
+        window.open(order.approvalUrl, '_blank', 'noopener,noreferrer');
+        setNotice('Complete the PayPal approval in the new tab, then click "I have approved" to finish.');
+        window.__glondiaPaypalOrderId = order.paypalOrderId;
+      } else {
+        setError('PayPal is not configured. Use a bank receipt instead.');
+      }
+    } catch (e) { setError(e.message || 'Could not start PayPal payment.'); }
+    finally { setBusy(''); }
+  };
+
+  const handleCapture = async () => {
+    const ppId = window.__glondiaPaypalOrderId;
+    if (!ppId) { setError('Start a PayPal payment first.'); return; }
+    setBusy('capture'); setError(''); setNotice('');
+    try {
+      await capturePaypalOrder(ppId);
+      setNotice('Payment captured. This deployment is now paid.');
+      refresh();
+    } catch (e) { setError(e.message || 'Could not capture the PayPal payment.'); }
+    finally { setBusy(''); }
+  };
+
+  const handleUpload = async () => {
+    if (!orderId) { setError('No billing order is attached to this deployment yet.'); return; }
+    if (!file) { setError('Choose a receipt file (PDF, PNG, JPG).'); return; }
+    setBusy('upload'); setError(''); setNotice('');
+    try {
+      await uploadManualReceipt(file, { checkoutOrderId: orderId });
+      setNotice('Receipt uploaded. An administrator will review and approve it.');
+      setFile(null); if (fileRef.current) fileRef.current.value = '';
+      refresh();
+    } catch (e) { setError(e.message || 'Receipt upload failed.'); }
+    finally { setBusy(''); }
+  };
+
+  return (
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Hosting fee — K100</h2>
+      <p className="muted" style={{ marginTop: 0 }}>Every deployment costs a fixed <b>K100</b>. Your site is live now; pay within the grace window or it will be suspended automatically.</p>
+      {error && <div style={{ color: 'var(--danger)', marginBottom: 12 }}>{error}</div>}
+      {notice && <div style={{ color: 'var(--accent)', marginBottom: 12 }}>{notice}</div>}
+
+      <div className="kv" style={{ gridTemplateColumns: '140px 1fr' }}>
+        <dt>Amount</dt><dd><b>K{((app.priceCents ?? 10000) / 100).toFixed(0)}</b> {app.priceCurrency || 'PGK'}</dd>
+        <dt>Status</dt><dd><Badge tone={paid ? 'success' : expired ? 'danger' : 'warn'}>{paymentStatus}</Badge></dd>
+        <dt>Grace period</dt><dd>{remaining != null ? `${remaining} hours remaining` : 'Not calculated'}</dd>
+        <dt>Deadline</dt><dd>{app.billingDueAt ? new Date(app.billingDueAt).toLocaleString() : 'Pending'}</dd>
+        {app.paidAt && <><dt>Paid at</dt><dd>{new Date(app.paidAt).toLocaleString()}</dd></>}
+        {orderId && <><dt>Order</dt><dd className="mono">{orderId}</dd></>}
+      </div>
+
+      {paid ? (
+        <div style={{ marginTop: 16, color: 'var(--accent)', fontWeight: 700 }}><ICN.CheckCircle size={16} /> Payment received — thank you.</div>
+      ) : (
+        <div style={{ marginTop: 18, display: 'grid', gap: 18 }}>
+          <div>
+            <h3 style={{ margin: '0 0 8px' }}>Pay with PayPal or card</h3>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn btn-primary" disabled={busy === 'paypal' || !orderId} onClick={handlePaypal}><ICN.CreditCard size={14} /> {busy === 'paypal' ? 'Starting…' : 'Pay K100 with PayPal'}</button>
+              <button className="btn btn-outline" disabled={busy === 'capture'} onClick={handleCapture}>{busy === 'capture' ? 'Confirming…' : 'I have approved'}</button>
+            </div>
+          </div>
+
+          <div>
+            <h3 style={{ margin: '0 0 8px' }}>Or upload a bank transfer receipt</h3>
+            <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>Accepted: PDF, PNG, JPG. An administrator will verify and approve it.</p>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+              <button className="btn btn-primary" disabled={busy === 'upload' || !file || !orderId} onClick={handleUpload}><ICN.Cloud size={14} /> {busy === 'upload' ? 'Uploading…' : 'Upload receipt'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function HostingSettings() {

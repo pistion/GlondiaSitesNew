@@ -1,10 +1,13 @@
 import express from 'express';
 import hostingController from '../controllers/hostingController.js';
 import authMiddleware from '../middleware/authMiddleware.js';
+import { deploymentOwnership } from '../middleware/deploymentOwnership.middleware.js';
 
 const router = express.Router();
 
 router.use(authMiddleware);
+// Enforce per-user ownership on every :deploymentId route (admins bypass).
+router.param('deploymentId', deploymentOwnership);
 router.post('/import-from-render', hostingController.importFromRender);
 router.get('/', hostingController.listHosting);
 router.get('/:deploymentId', hostingController.getHostingService);

@@ -36,6 +36,9 @@ import environmentRoutes from './routes/environmentRoutes.js';
 import domainHostingRoutes from './routes/domainRoutes.js';
 import diskRoutes from './routes/diskRoutes.js';
 import vpsHostingRoutes from './routes/vpsHostingRoutes.js';
+import paymentsRoutes from './routes/payments.routes.js';
+import adminRoutes from './routes/admin.routes.js';
+import { startDeploymentCleanupJob } from './services/deploymentCleanupService.js';
 import { prisma } from './services/db.js';
 import { auditWrites } from './middleware/audit.middleware.js';
 import deploymentService from './services/deploymentService.js';
@@ -569,6 +572,10 @@ app.use('/api/hosting', hostingRoutes);
 app.use('/api/hosting', environmentRoutes);
 app.use('/api/hosting', diskRoutes);
 app.use('/api/hosting', requireFeature('DOMAINS'), domainHostingRoutes);
+
+// Deploy-first K100 billing: customer payments + receipts, and the admin surface.
+app.use('/api/payments', paymentsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // ── SPA fallback — serve Vite dist for everything else ──────────────────────
 app.use((req, res) => serveStatic(req, res));
@@ -2008,7 +2015,8 @@ if (process.env.NODE_ENV !== 'test') {
       .then(() => console.log('[glondia] Database connection established.'))
       .catch((err) => console.error('[glondia] Database connection FAILED:', err.message, '\n  Check that the persistent disk is mounted and DATABASE_URL is correct.'));
   });
-  startPaymentEnforcementJob();
+  // Deploy-first K100 billing: enforce the 12-hour grace window every 5 minutes.
+  startDeploymentCleanupJob();
 }
 
 export default app;

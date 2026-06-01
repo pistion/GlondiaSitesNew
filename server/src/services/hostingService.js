@@ -32,12 +32,13 @@ class HostingService {
    * pre-deployed apps appear without needing a manual import call.
    * Individual per-deployment sync happens in getService() or sync().
    */
-  async listHosting(userId) {
+  async listHosting(userId, options = {}) {
     // Background import — pull any Render services not yet tracked.
     // Fire-and-forget so the list response is never delayed.
     this.importFromRender().catch(() => {});
 
     const store = await readHostingStore();
+    const isAdmin = options.isAdmin === true;
     return store.deployments
       .filter((d) => isManagedRenderDeployment(d))
       // Show every deployment belonging to this user — failed, suspended,
@@ -45,7 +46,8 @@ class HostingService {
       // Exclude only: other users' records, and imported/pre-existing services
       // (platformDeployed === false). platformDeployed undefined is allowed so
       // older records aren't accidentally hidden.
-      .filter((d) => d.userId === userId && d.platformDeployed !== false)
+      // Admins bypass the per-user filter and see every deployment.
+      .filter((d) => (isAdmin || d.userId === userId) && d.platformDeployed !== false)
       .map((d) => this.toHostingSummary(d));
   }
 
@@ -870,6 +872,14 @@ class HostingService {
       status: deployment.status,
       buildStatus: deployment.buildStatus,
       currentStep: deployment.currentStep,
+      // Deploy-first K100 billing surface (so the dashboard can show a pay CTA).
+      paymentStatus: deployment.paymentStatus || null,
+      checkoutOrderId: deployment.checkoutOrderId || null,
+      billingDueAt: deployment.billingDueAt || null,
+      paidAt: deployment.paidAt || null,
+      priceCents: deployment.priceCents ?? null,
+      priceCurrency: deployment.priceCurrency || null,
+      deletedReason: deployment.deletedReason || null,
       liveUrl: deployment.liveUrl,
       verifiedUrl: deployment.verifiedUrl,
       urlReachable: deployment.urlReachable,

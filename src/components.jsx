@@ -88,26 +88,38 @@ export const DASH_NAV = [
       { key: "settings",   label: "Settings",       icon: "Settings",        route: { view: "settings" }, feature: "settings" },
     ],
   },
+  {
+    title: "Administration",
+    items: [
+      { key: "admin",      label: "Admin",          icon: "ShieldCheck",     route: { view: "admin" }, admin: true },
+    ],
+  },
 ];
 
 // Sidebar groups with disabled-feature items removed (and empty groups dropped).
-function visibleNavGroups() {
+// Admin-only items are hidden unless the current user has the admin role.
+function visibleNavGroups({ isAdmin = false } = {}) {
   return DASH_NAV
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !item.feature || isFeatureEnabled(item.feature)),
+      items: group.items.filter((item) => {
+        if (item.feature && !isFeatureEnabled(item.feature)) return false;
+        if (item.admin && !isAdmin) return false;
+        return true;
+      }),
     }))
     .filter((group) => group.items.length > 0);
 }
 
 export function DashSidebar({ active, navigate }) {
+  const isAdmin = getStoredAuth()?.user?.role === 'admin';
   return (
     <aside className="dash-side">
       <div className="dash-side-head">
         <Logo compact onClick={() => { window.location.href = "/"; }} />
       </div>
       <nav className="dash-side-nav">
-        {visibleNavGroups().map((group) => (
+        {visibleNavGroups({ isAdmin }).map((group) => (
           <div key={group.title}>
             <div className="dash-side-group-title">{group.title}</div>
             {group.items.map((item) => {

@@ -3,6 +3,22 @@ import { getZipDeployConfigStatus, validateZipSite } from '../pipelines/base64Zi
 import { run as runGithubLinkToRender } from '../pipelines/githubLinkToRender.pipeline.js';
 import { run as runGeneratedSiteToRender } from '../pipelines/generatedSiteToRender.pipeline.js';
 import { run as runZipToRender } from '../pipelines/zipToRender.pipeline.js';
+import { createDeploymentOrder } from '../../../services/deploymentBillingService.js';
+
+/**
+ * Attach a pending K100 billing order to a freshly created deployment.
+ * Deployment happens first; billing must never block the deploy response, so a
+ * failure here is logged and the deploy still succeeds (cleanup job is a safety
+ * net only for deployments that actually carry an order).
+ */
+async function attachBilling(deployment, req, kind) {
+  try {
+    return await createDeploymentOrder({ deployment, user: req.user || {}, kind });
+  } catch (error) {
+    console.error('[billing] Failed to attach K100 order:', error.message);
+    return null;
+  }
+}
 
 const hostingDeployController = {
   createDeployment: async (req, res, next) => {
@@ -33,7 +49,8 @@ const hostingDeployController = {
   createGithubDeployment: async (req, res, next) => {
     try {
       const deployment = await runGithubLinkToRender(req.body || {}, { userId: req.user?.id });
-      res.status(202).json({ data: deployment, message: 'GitHub deployment session started.', requestId: req.id });
+      const billing = await attachBilling(deployment, req, 'github');
+      res.status(202).json({ data: { ...deployment, billing }, billing, message: 'GitHub deployment session started.', requestId: req.id });
     } catch (error) {
       if (!error.stage) error.stage = 'github_repo_validate';
       next(error);
@@ -44,7 +61,8 @@ const hostingDeployController = {
     try {
       const file = req.file || req.files?.siteZip?.[0] || req.files?.zip?.[0] || req.files?.file?.[0];
       const deployment = await runZipToRender({ file, fields: req.body || {} }, { userId: req.user?.id });
-      res.status(202).json({ data: deployment, message: 'ZIP deployment session started.', requestId: req.id });
+      const billing = await attachBilling(deployment, req, 'zip');
+      res.status(202).json({ data: { ...deployment, billing }, billing, message: 'ZIP deployment session started.', requestId: req.id });
     } catch (error) {
       if (!error.stage) error.stage = 'zip_upload';
       next(error);

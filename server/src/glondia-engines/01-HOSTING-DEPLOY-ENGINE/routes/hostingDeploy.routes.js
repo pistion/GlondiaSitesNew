@@ -4,8 +4,8 @@ import hostingDeployController from '../controllers/hostingDeploy.controller.js'
 import authMiddleware from '../../../middleware/authMiddleware.js';
 import deploymentSessionMiddleware from '../../../middleware/deploymentSessionMiddleware.js';
 import { validateDeploymentInput } from '../../../middleware/validationMiddleware.js';
-import { requireActivePlan, requireSiteQuota } from '../../../middleware/planGate.js';
 import { requireFeature } from '../../../middleware/featureFlag.js';
+import { deploymentOwnership } from '../../../middleware/deploymentOwnership.middleware.js';
 
 const router = express.Router();
 const upload = multer({
@@ -29,25 +29,25 @@ const upload = multer({
 // All deployment routes require a valid session (authMiddleware rejects in prod
 // without a token; allows the local-user fallback only in dev/demo mode).
 router.use(authMiddleware);
+// Per-user ownership guard on every :deploymentId route (admins bypass).
+router.param('deploymentId', deploymentOwnership);
 router.get('/settings', hostingDeployController.getSettings);
 
-// ZIP upload hosting — feature-gated and plan/quota-gated.
+// ZIP upload hosting — deploy-first K100 billing. Feature-gated only; no plan
+// or quota gate. The deployment runs first, then a pending K100 order is
+// attached with a 12-hour grace window (see hostingDeploy.controller.js).
 router.post(
   '/zip',
   requireFeature('ZIP_HOSTING'),
-  requireActivePlan,
-  requireSiteQuota,
   upload.fields([{ name: 'zip', maxCount: 1 }, { name: 'file', maxCount: 1 }, { name: 'siteZip', maxCount: 1 }]),
   hostingDeployController.createZipDeployment,
 );
 router.post('/zip/validate', upload.fields([{ name: 'zip', maxCount: 1 }, { name: 'file', maxCount: 1 }, { name: 'siteZip', maxCount: 1 }]), hostingDeployController.validateZipDeployment);
 
-// GitHub upload/import hosting — feature-gated and plan/quota-gated.
+// GitHub upload/import hosting — deploy-first K100 billing. Feature-gated only.
 router.post(
   '/github',
   requireFeature('GITHUB_HOSTING'),
-  requireActivePlan,
-  requireSiteQuota,
   hostingDeployController.createGithubDeployment,
 );
 router.post('/generated-site', hostingDeployController.createGeneratedSiteDeployment);

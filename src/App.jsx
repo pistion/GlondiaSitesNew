@@ -25,6 +25,7 @@ import {
   BuilderEditor, BuilderAiIntake, BuilderDeploymentSettings,
 } from './features/builder';
 import { ActivityPage } from './activity';
+import { AdminPage } from './features/admin/AdminPage.jsx';
 import { useBilling } from './use-billing';
 import { VpsHostingList, VpsCreateWizard, VpsDetail } from './vps-hosting';
 import { notifyDataChanged } from './api';
@@ -149,7 +150,7 @@ export default function App() {
   const DASHBOARD_VIEWS = new Set([
     "overview","hosting-list","hosting-detail","domains-mine","domains-buy","dns",
     "builder-gallery","builder-templates","builder-roxanne","builder-import","builder-editor","builder-ai-intake","builder-deployment-settings",
-    "analytics","activity","billing","settings","vps-hosting","vps-create","vps-detail",
+    "analytics","activity","billing","settings","vps-hosting","vps-create","vps-detail","admin",
   ]);
 
   // Render
@@ -179,6 +180,7 @@ export default function App() {
       case "builder-editor":                 return <BuilderEditor id={route.params?.id} siteId={route.params?.siteId} navigate={navigate} />;
       case "analytics":         return <SimplePage title="Analytics" body="Cross-project analytics — coming up next." />;
       case "activity":          return <ActivityPage />;
+      case "admin":             return <AdminPage navigate={navigate} />;
       case "billing":           return <BillingPageIntegrated />;
       case "settings":          return <SimplePage title="Settings" body="Workspace settings — coming up next." />;
       case "vps-hosting":       return <VpsHostingList navigate={navigate} />;
@@ -217,6 +219,7 @@ export default function App() {
       case "builder-import":  return [{ label: "Site builder", onClick: () => navigate({ view: "builder-gallery" }) }, { label: "Import" }];
       case "builder-editor":  return [{ label: "Templates", onClick: () => navigate({ view: "builder-templates" }) }, { label: "Editor" }];
       case "billing":         return [{ label: "Workspace" }, { label: "Billing" }];
+      case "admin":           return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Admin" }];
       case "vps-hosting":    return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Cloud Servers" }];
       case "vps-create":     return [{ label: "Cloud Servers", onClick: () => navigate({ view: "vps-hosting" }) }, { label: "New server" }];
       case "vps-detail":     return [{ label: "Cloud Servers", onClick: () => navigate({ view: "vps-hosting" }) }, { label: route.params?.id || "Server" }];

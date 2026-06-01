@@ -35,8 +35,10 @@ if (sqlitePath) {
 }
 console.log(`[db-push] DATABASE_URL=${normalized}`);
 
+// Invoke Prisma's JS entry directly (not the .bin shim) so this works on
+// Windows as well as Linux/macOS.
 execFileSync(
   process.execPath,
-  ['node_modules/.bin/prisma', 'db', 'push', '--schema=prisma/schema.prisma', '--accept-data-loss'],
+  ['node_modules/prisma/build/index.js', 'db', 'push', '--schema=prisma/schema.prisma', '--accept-data-loss'],
   { stdio: 'inherit', env: { ...process.env, DATABASE_URL: normalized } },
 );

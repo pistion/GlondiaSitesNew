@@ -127,6 +127,10 @@ model WebHostingService {
   currency          String    @default("USD")
   billingModel      String    @default("monthly") @map("billing_model")
   paymentStatus     String    @default("pending") @map("payment_status")
+  // Deploy-first billing (K100): grace deadline + payment timestamp + why removed.
+  billingDueAt      DateTime? @map("billing_due_at")
+  paidAt            DateTime? @map("paid_at")
+  deletedReason     String?   @map("deleted_reason")
   metadata          String    @default("{}") // JSON as TEXT
   deletedAt         DateTime? @map("deleted_at")
   createdAt         DateTime  @default(now()) @map("created_at")
@@ -188,13 +192,74 @@ model CheckoutOrder {
   markupPercent     Float    @default(30) @map("markup_percent")
   markupAmountCents Int      @default(0) @map("markup_amount_cents")
   totalAmountCents  Int      @default(0) @map("total_amount_cents")
+  // Deploy-first billing link: which deployment this K100 order pays for.
+  deploymentId      String?  @map("deployment_id")
+  dueAt             DateTime? @map("due_at")
+  paidAt            DateTime? @map("paid_at")
   metadata          String   @default("{}") // JSON as TEXT
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  receipts          PaymentReceipt[]
+
   @@index([organizationId, status])
   @@index([type, createdAt])
+  @@index([userId, status])
+  @@index([deploymentId])
   @@map("checkout_orders")
+}
+
+// ─── Payment Receipts (manual bank transfer proof) ───────────────────────────
+// Uploaded to the Render persistent disk (DATA_DIR/receipts/...). Admin reviews
+// and approves/rejects. Approval marks the linked order + deployment paid.
+
+model PaymentReceipt {
+  id               String    @id @default(uuid())
+  checkoutOrderId  String    @map("checkout_order_id")
+  userId           String?   @map("user_id")
+  deploymentId     String?   @map("deployment_id")
+  method           String    @default("bank_transfer")
+  fileName         String    @map("file_name")
+  filePath         String    @map("file_path")
+  fileType         String?   @map("file_type")
+  fileSize         Int       @default(0) @map("file_size")
+  amountCents      Int       @default(0) @map("amount_cents")
+  currency         String    @default("PGK")
+  status           String    @default("pending") // pending | approved | rejected
+  note             String?
+  reviewedByUserId String?   @map("reviewed_by_user_id")
+  reviewedAt       DateTime? @map("reviewed_at")
+  reviewNote       String?   @map("review_note")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  checkoutOrder CheckoutOrder @relation(fields: [checkoutOrderId], references: [id], onDelete: Cascade)
+
+  @@index([checkoutOrderId])
+  @@index([userId])
+  @@index([status, createdAt])
+  @@map("payment_receipts")
+}
+
+// ─── Deployment Cleanup Jobs (audit trail for unpaid-grace enforcement) ──────
+// One row per cleanup action taken by the 12-hour grace enforcement service.
+// DB history is preserved — records are never deleted.
+
+model DeploymentCleanupJob {
+  id              String   @id @default(uuid())
+  deploymentId    String   @map("deployment_id")
+  checkoutOrderId String?  @map("checkout_order_id")
+  userId          String?  @map("user_id")
+  action          String   // suspend | delete | skip
+  reason          String?
+  renderServiceId String?  @map("render_service_id")
+  status          String   @default("done") // done | failed
+  detail          String   @default("{}") // JSON as TEXT
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([deploymentId])
+  @@index([createdAt])
+  @@map("deployment_cleanup_jobs")
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
