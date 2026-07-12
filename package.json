@@ -8,7 +8,12 @@
   },
   "scripts": {
     "dev": "node server/src/server.js",
-    "test": "node --test \"server/test/**/*.test.js\"",
+    "test": "node --test --test-concurrency=1 \"server/test/**/*.test.js\"",
+    "test:unit": "node --test --test-concurrency=1 \"server/test/builderStateMachine.test.js\" \"server/test/builderJobLease.test.js\" \"server/test/serviceAccessRules.test.js\" \"server/test/vpsDto.test.js\"",
+    "test:integration": "node --test --test-concurrency=1 \"server/test/**/*.integration.test.js\"",
+    "test:security": "node --test --test-concurrency=1 \"server/test/**/*.security.test.js\"",
+    "test:contracts": "node --test --test-concurrency=1 \"server/test/architecture.test.js\"",
+    "lint": "node scripts/lint-syntax.mjs",
     "build": "vite build",
     "start": "node server/src/server.js",
     "preview": "vite preview",
@@ -18,6 +23,7 @@
     "db:status": "prisma migrate status",
     "db:validate": "prisma validate",
     "db:preflight": "node scripts/pre-migration-check.mjs",
+    "migrate:builder-json": "node scripts/migrate-builder-json.mjs",
     "templates:bootstrap": "node scripts/bootstrap-generated-template-repo.mjs",
     "predeploy": "npm run db:validate && npm run db:preflight && npm run build"
   },

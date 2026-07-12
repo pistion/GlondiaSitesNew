@@ -31,7 +31,22 @@ async function readStore() {
   return JSON.parse(text);
 }
 
+// After the canonical cutover, Prisma is the source of truth and legacy JSON
+// writes must stop. BUILDER_DB_STORAGE=true freezes this store; set
+// BUILDER_LEGACY_JSON_WRITES=true only for a temporary rollback window.
+function legacyWritesFrozen() {
+  if (String(process.env.BUILDER_LEGACY_JSON_WRITES || '').toLowerCase() === 'true') return false;
+  return String(process.env.FEATURE_BUILDER_DB_STORAGE || '').toLowerCase() === 'true';
+}
+
 async function writeStore(store) {
+  if (legacyWritesFrozen()) {
+    const err = new Error('Legacy template-site JSON store is read-only after the canonical Builder cutover.');
+    err.status = 409;
+    err.code = 'BUILDER_LEGACY_STORE_FROZEN';
+    err.expose = true;
+    throw err;
+  }
   await mkdir(dirname(storePath), { recursive: true });
   await writeFile(storePath, JSON.stringify(store, null, 2));
   return store;
