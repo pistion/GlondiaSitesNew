@@ -30,6 +30,21 @@ export function zipError(code, message, status = 400) {
 
 const NESTED_ARCHIVE_RE = /\.(zip|tar|tgz|gz|bz2|xz|rar|7z|jar|war)$/i;
 
+// High-confidence secret files are blocked by NAME even when the deploy
+// pipeline would otherwise ignore them (so they can never be published), and
+// regardless of content. Example/sample env files are allowed.
+const SECRET_FILENAME_RE = [
+  /(^|\/)\.env(\.(?!example$|sample$|template$)[^/]*)?$/i,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+  /\.(pem|key|p12|pfx|jks|keystore)$/i,
+  /(^|\/)\.npmrc$/i,
+  /(^|\/)\.git-credentials$/i,
+];
+
+export function isSecretFilename(name) {
+  return SECRET_FILENAME_RE.some((re) => re.test(String(name || '')));
+}
+
 // Unix file types live in the high 16 bits of the ZIP external attributes.
 const S_IFMT = 0o170000;
 const S_IFLNK = 0o120000;
@@ -88,6 +103,10 @@ export function assertEntrySafe(entry, relativeName, limits, state) {
   }
   if (segments.some((part) => part === '..')) {
     throw zipError('ZIP_PATH_NOT_ALLOWED', `ZIP entry path is not allowed: ${name}`);
+  }
+  if (isSecretFilename(name)) {
+    // Do not echo the path in detail beyond its basename — it is a credential file.
+    throw zipError('ZIP_SECRETS_DETECTED', `The ZIP contains a credential file (${name.split('/').pop()}). Remove it and upload again.`);
   }
 
   // Duplicate paths and case-collisions (a.CSS overwriting a.css on

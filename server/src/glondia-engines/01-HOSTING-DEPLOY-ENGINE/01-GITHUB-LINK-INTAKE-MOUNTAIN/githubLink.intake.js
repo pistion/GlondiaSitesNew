@@ -5,13 +5,15 @@
  * This path is intentionally separate from ZIP -> GitHub -> Render.
  */
 
-export function normalizeGithubLinkInput(input = {}, context = {}) {
-  const repoUrl = String(input.repoUrl || input.repositoryUrl || input.sourceRepository || input.sourceReference || '').trim();
-  if (!repoUrl) throw requestError('repoUrl is required.', 400, 'github_repo_validate');
-  const parsedRepo = parseGithubRepoUrl(repoUrl);
-  if (!parsedRepo) throw requestError('A valid GitHub repository URL is required.', 400, 'github_repo_validate');
+import { assertSafeGithubUrl, assertSafeBranch } from '../../../builder/security/githubGuard.js';
 
-  const branch = String(input.branch || input.githubBranch || 'main').trim() || 'main';
+export function normalizeGithubLinkInput(input = {}, context = {}) {
+  const rawUrl = String(input.repoUrl || input.repositoryUrl || input.sourceRepository || input.sourceReference || '').trim();
+  if (!rawUrl) throw requestError('repoUrl is required.', 400, 'github_repo_validate');
+  // SSRF-safe: reject non-github.com hosts, credentials, IP literals, and
+  // http. The normalized https URL is the ONLY thing we forward downstream.
+  const parsedRepo = assertSafeGithubUrl(rawUrl);
+  const branch = assertSafeBranch(input.branch || input.githubBranch || 'main');
   const siteName = input.serviceName || input.name || input.siteName || parsedRepo.repo || 'glondia-github-site';
 
   return {
@@ -20,11 +22,11 @@ export function normalizeGithubLinkInput(input = {}, context = {}) {
     userId: context.userId || input.userId || null,
     siteId: input.siteId || null,
     projectId: input.projectId || input.siteId || null,
-    repoUrl,
+    repoUrl: parsedRepo.url,
     parsedRepo,
     branch,
     siteName,
-    sourceReference: repoUrl,
+    sourceReference: parsedRepo.url,
   };
 }
 

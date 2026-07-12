@@ -813,11 +813,13 @@ async function writeRenderShellFile(siteDir, { detected, publishDirectory, reque
   const buildCmd = userBuild || defaultBuildCommand(detected);
   const pm = detected.packageManager || 'npm';
 
+  // Package lifecycle scripts (preinstall/install/postinstall/prepare) are
+  // never executed for customer source — installs run with --ignore-scripts.
   const installCmd = pm === 'pnpm'
-    ? (detected.hasLockFile ? 'pnpm install --frozen-lockfile' : 'pnpm install')
+    ? (detected.hasLockFile ? 'pnpm install --frozen-lockfile --ignore-scripts' : 'pnpm install --ignore-scripts')
     : pm === 'yarn'
-      ? (detected.hasLockFile ? 'yarn install --frozen-lockfile' : 'yarn install')
-      : (detected.hasLockFile ? 'npm ci' : 'npm install');
+      ? (detected.hasLockFile ? 'yarn install --frozen-lockfile --ignore-scripts' : 'yarn install --ignore-scripts')
+      : (detected.hasLockFile ? 'npm ci --ignore-scripts' : 'npm install --ignore-scripts');
 
   const runBuild = pm === 'pnpm' ? buildCmd.replace(/^npm run /, 'pnpm run ') : pm === 'yarn' ? buildCmd.replace(/^npm run /, 'yarn ') : buildCmd;
 
