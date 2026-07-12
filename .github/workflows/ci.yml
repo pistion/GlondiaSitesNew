@@ -27,6 +27,22 @@ jobs:
       - run: npx prisma generate
       - run: npx prisma validate
 
+      # Apply the schema to a temporary DB so migration drift fails CI, not prod.
+      - name: Apply schema to temporary database
+        run: npx prisma db push --skip-generate
+
+      # Dependency-free static check (parse + early errors) over server + scripts.
+      - name: Static checks (lint)
+        run: npm run lint
+
+      # Full suite: unit + integration + contract + security tests. Provider
+      # calls are mocked / unconfigured in tests, so nothing hits GitHub/Render.
+      - run: npm test
+
+      # Smoke-test the legacy migration command (no writes).
+      - name: Builder migration dry-run
+        run: npm run migrate:builder-json -- --dry-run
+
       # Syntax-only check — node --check parses but never executes files,
       # so server entry-points and async top-level code can't hang the runner.
       - name: Syntax check (server JS)
