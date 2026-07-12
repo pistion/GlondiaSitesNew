@@ -7,3 +7,4 @@ export { BuilderEditor }             from './advanced/BuilderEditor.jsx';
 export { BuilderImport }             from './advanced/BuilderImport.jsx';
 export { BuilderRoxanne }            from './advanced/BuilderRoxanne.jsx';
 export { BuilderSitePlan }           from './pages/SitePlanBuilder.jsx';
+export { BuilderProjectShell }       from './project/BuilderProjectShell.jsx';

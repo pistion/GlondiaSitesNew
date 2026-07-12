@@ -20,6 +20,9 @@ const DEFAULTS = {
 
   vps: true,
   aiBuilder: false,
+  // Canonical durable BuilderProject flow (project routes that survive refresh).
+  // Ships dark until the backend rollout flags are enabled per environment.
+  builderProjectFlow: false,
   templateMarketplace: false,
   analytics: false,
   settings: false,
@@ -38,6 +41,7 @@ const ENV_KEYS = {
   domains: 'VITE_FEATURE_DOMAINS',
   vps: 'VITE_FEATURE_VPS',
   aiBuilder: 'VITE_FEATURE_AI_BUILDER',
+  builderProjectFlow: 'VITE_FEATURE_BUILDER_PROJECT_FLOW',
   templateMarketplace: 'VITE_FEATURE_TEMPLATE_MARKETPLACE',
   analytics: 'VITE_FEATURE_ANALYTICS',
   settings: 'VITE_FEATURE_SETTINGS',
@@ -69,6 +73,7 @@ export const VIEW_FEATURE = {
   'vps-create': 'vps',
   'vps-detail': 'vps',
   'builder-roxanne': 'aiBuilder',
+  'builder-project': 'builderProjectFlow',
   // Template picker belongs to the Site Builder surface; templateMarketplace
   // is reserved for the future paid template store.
   'builder-templates': 'siteBuilder',

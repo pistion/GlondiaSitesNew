@@ -56,6 +56,9 @@ export function BuilderGallery({ navigate }) {
   const showAi = isFeatureEnabled('aiBuilder');
   // Template picker is part of the core Site Builder surface.
   const showTemplates = isFeatureEnabled('siteBuilder');
+  // Canonical durable project flow (refresh-safe projects). When on, it is the
+  // recommended production path and replaces the transient template setup.
+  const showProjectFlow = isFeatureEnabled('builderProjectFlow');
   const visibleCount = Math.max(1, (showAi ? 1 : 0) + (showTemplates ? 1 : 0));
 
   return (
@@ -69,6 +72,22 @@ export function BuilderGallery({ navigate }) {
           </p>
         </div>
       </div>
+
+      {showProjectFlow && (
+        <div className="card" style={{ padding: '16px 18px', marginBottom: 18, borderColor: 'var(--accent)' }}>
+          <div className="row between" style={{ alignItems: 'center', gap: 12 }}>
+            <div>
+              <div style={{ fontWeight: 700 }}>Your saved projects</div>
+              <div className="muted" style={{ fontSize: 13, marginTop: 3 }}>
+                Durable projects that save to the server and resume after refresh — plan, generate, preview, approve, and deploy.
+              </div>
+            </div>
+            <button className="btn btn-primary" onClick={() => navigate({ view: 'builder-project', params: {} })}>
+              Open projects
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ padding: '14px 16px', marginBottom: 18 }}>
         <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>

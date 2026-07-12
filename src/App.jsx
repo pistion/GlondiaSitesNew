@@ -23,6 +23,7 @@ import { DomainsMine, DomainsBuy, DnsEditor } from './domains';
 import {
   BuilderGallery, BuilderTemplates, BuilderRoxanne, BuilderImport,
   BuilderEditor, BuilderAiIntake, BuilderDeploymentSettings, BuilderSitePlan,
+  BuilderProjectShell,
 } from './features/builder';
 import { ActivityPage } from './activity';
 import BillingPage from './features/billing/BillingPage.jsx';
@@ -116,6 +117,12 @@ function accountPathFor(route, user = getStoredAuth().user) {
   if (route.view === 'builder-deployment-settings') {
     return `/${CLIENT_ROUTE_PREFIX}/${clientId}/site-builder/deploy`;
   }
+  if (route.view === 'builder-project') {
+    const base = `/${CLIENT_ROUTE_PREFIX}/${clientId}/site-builder/projects`;
+    if (!route.params?.projectId) return base;
+    const step = route.params.step || 'plan';
+    return `${base}/${encodeURIComponent(route.params.projectId)}/${encodeURIComponent(step)}`;
+  }
   if (route.view === 'builder-templates') {
     return `/${CLIENT_ROUTE_PREFIX}/${clientId}/site-builder/templates`;
   }
@@ -145,6 +152,10 @@ function routeFromAccountPath(pathname = window.location.pathname) {
   if (key === 'hosting/zip-upload') return { view: 'builder-import', params: { mode: 'zip' } };
   if (rest[0] === 'hosting' && rest[1]) return { view: 'hosting-detail', params: { id: rest[1] } };
   if (rest[0] === 'domains' && rest[1] && rest[2] === 'dns') return { view: 'dns', params: { domain: rest[1] } };
+  if (rest[0] === 'site-builder' && rest[1] === 'projects') {
+    if (rest[2]) return { view: 'builder-project', params: { projectId: rest[2], step: rest[3] || 'plan' } };
+    return { view: 'builder-project', params: {} };
+  }
   if (key === 'site-builder/templates') return { view: 'builder-templates' };
   if (key === 'site-builder/roxanne') return { view: 'builder-roxanne' };
   if (key === 'site-builder/import') return { view: 'builder-import', params: { mode: 'github' } };
@@ -278,7 +289,9 @@ function ClientDashboardApp() {
     if (!isLiveMode() && !isAuthenticated()) {
       authLogin('dev@glondia.local', 'devpass').then(() => {
         setAuthed(true);
-        navigate({ view: 'builder-gallery' }, { replace: true });
+        // Preserve a deep-linked route (e.g. a builder project URL) so refresh
+        // resumes where the customer was instead of bouncing to the gallery.
+        navigate(routeFromAccountPath() || { view: 'builder-gallery' }, { replace: true });
       }).catch(() => {});
     } else if (!isLiveMode() && isAuthenticated()) {
       navigate(routeFromAccountPath() || { view: 'builder-gallery' }, { replace: true });
@@ -367,7 +380,7 @@ function ClientDashboardApp() {
 
   const DASHBOARD_VIEWS = new Set([
     "overview","hosting-list","hosting-detail","domains-mine","domains-buy","dns",
-    "builder-gallery","builder-templates","builder-roxanne","builder-import","builder-editor","builder-ai-intake","builder-deployment-settings","builder-site-plan",
+    "builder-gallery","builder-templates","builder-roxanne","builder-import","builder-editor","builder-ai-intake","builder-deployment-settings","builder-site-plan","builder-project",
     "analytics","activity","billing","email","settings","profile","vps-hosting","vps-create","vps-detail",
     "support",
   ]);
@@ -391,6 +404,7 @@ function ClientDashboardApp() {
       case "domains-buy":       return <DomainsBuy navigate={navigate} />;
       case "dns":               return <DnsEditor domain={route.params?.domain || ""} navigate={navigate} />;
       case "builder-gallery":   return <BuilderGallery navigate={navigate} />;
+      case "builder-project":   return <BuilderProjectShell projectId={route.params?.projectId || null} step={route.params?.step || "plan"} navigate={navigate} />;
       case "builder-templates": return <BuilderTemplates navigate={navigate} />;
       case "builder-roxanne":   return <BuilderRoxanne navigate={navigate} />;
       case "builder-import":    return <BuilderImport mode={route.params?.mode || "github"} navigate={navigate} />;
