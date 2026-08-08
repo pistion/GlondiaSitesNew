@@ -40,6 +40,13 @@ export async function listByOrganization(organizationId) {
   });
 }
 
+/** Admin listing: every VPS record, including failed/destroyed rows for audit. */
+export async function listAllForAdmin() {
+  return prisma.vpsService.findMany({
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
 /** Admin resolver lookup: records by id, including soft-deleted ones. */
 export async function findManyByIds(ids) {
   if (!ids?.length) return [];

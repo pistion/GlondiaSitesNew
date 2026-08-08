@@ -25,6 +25,7 @@ import { publishToControlledRepo, archiveControlledRepo } from '../03-GITHUB-SOU
 import { githubAppConfigured } from '../03-GITHUB-SOURCE-MOUNTAIN/githubAppAuth.stage.js';
 import { buildRenderPayload } from '../04-RENDER-PAYLOAD-MOUNTAIN/renderPayloadBuilder.stage.js';
 import { createAndTriggerRenderDeploy } from '../05-RENDER-DEPLOY-MOUNTAIN/renderDeploy.stage.js';
+import { publishStaticSiteToVps } from '../06-VPS-HOSTING-MOUNTAIN/vpsHostingPublisher.stage.js';
 import { startPostDeployPolling } from '../../../services/deploymentPostDeployPoller.js';
 import { hasRealValue } from '../../00-SHARED/runtimeConfig.js';
 import {
@@ -36,12 +37,17 @@ import {
 
 export async function run(input = {}, context = {}) {
   const normalized = normalizeGithubLinkInput(input, context);
+  const requestedProvider = input.hostingTarget || input.hostingProvider || '';
+  const dedicatedRequested = ['vultr', 'dedicated', 'dedicated-vultr'].includes(String(requestedProvider).toLowerCase());
+  const useSharedServer = !dedicatedRequested && !(context.isAdmin === true && String(requestedProvider).toLowerCase() === 'render');
 
   const deployment = await createDeploymentRecord({
     userId: normalized.userId,
     siteId: normalized.siteId,
     projectId: normalized.projectId,
     serviceName: renderSafeName(normalized.siteName),
+    provider: dedicatedRequested ? 'vultr' : useSharedServer ? 'vps' : 'render',
+    plan: input.dedicatedTier || input.dedicatedPlanId || null,
     source: 'github-import',
     sourceReference: normalized.repoUrl,
     repoUrl: null, // controlled repo URL is filled in after publish — never the client repo
@@ -62,6 +68,28 @@ export async function run(input = {}, context = {}) {
   let controlledRepoRef = null;
 
   try {
+    if (dedicatedRequested && !input.dedicatedTier) {
+      await addDeploymentLog(deployment.deploymentId, 'Dedicated hosting tier was not recorded; deployment stopped before provisioning.', 'error', { stage: 'provider_select' });
+      return updateDeploymentRecord(deployment.deploymentId, {
+        platformDeployed: false,
+        status: 'failed',
+        buildStatus: 'configuration_required',
+        currentStep: 'Choose dedicated hosting tier',
+        paymentStatus: 'not_billable_yet',
+        errorMessage: 'Choose a dedicated hosting tier before deploying.',
+      });
+    }
+    if (dedicatedRequested) {
+      await addDeploymentLog(deployment.deploymentId, `Dedicated ${input.dedicatedTier} hosting request recorded.`, 'ok', {
+        stage: 'provider_select',
+        tier: input.dedicatedTier,
+        requestedPlan: input.dedicatedPlanId || null,
+      });
+    }
+    await addDeploymentLog(deployment.deploymentId, `Selected hosting target: ${useSharedServer ? 'Glondia Shared Server' : 'Render'}.`, 'info', {
+      provider: useSharedServer ? 'vps' : 'render',
+      stage: 'provider_select',
+    });
     await addDeploymentLog(deployment.deploymentId, `Importing client GitHub repository: ${normalized.parsedRepo.fullName}@${normalized.branch}.`, 'info', {
       originalSource: normalized.repoUrl,
     });
@@ -96,6 +124,100 @@ export async function run(input = {}, context = {}) {
       clientInstallationId: imported.clientInstallationId,
       importedAt: imported.importedAt,
     };
+
+    if (useSharedServer) {
+      const baseUpdate = {
+        repoUrl: normalized.repoUrl,
+        githubRepo: normalized.repoUrl,
+        githubBranch: normalized.branch,
+        serviceType: project.serviceType,
+        deployMode: resolvedMode.mode,
+        deployModeConfidence: resolvedMode.confidence,
+        deployModeWarnings: resolvedMode.warnings,
+        githubSource,
+        environmentConfiguration: {
+          sourceRepository: normalized.repoUrl,
+          originalSourceRepository: normalized.repoUrl,
+          branch: normalized.branch,
+          rootDirectory: imported.originalRootDirectory || '',
+          buildCommand: shell.buildCommand,
+          outputDirectory: project.publishDirectory,
+          startCommand: project.startCommand || '',
+          runtime: project.runtime || '',
+          provider: 'vps',
+          deployMode: resolvedMode.mode,
+          deployModeConfidence: resolvedMode.confidence,
+        },
+      };
+
+      if (dedicatedRequested) {
+        await addDeploymentLog(deployment.deploymentId, 'Repository intake is recorded and waiting for the managed dedicated provisioning worker.', 'info', { stage: 'provision' });
+        return updateDeploymentRecord(deployment.deploymentId, {
+          ...baseUpdate,
+          provider: 'vultr',
+          hostingPlan: 'dedicated',
+          dedicatedTier: input.dedicatedTier,
+          dedicatedPlanId: input.dedicatedPlanId || null,
+          platformDeployed: false,
+          status: 'ready',
+          buildStatus: 'provisioning_queued',
+          currentStep: 'Dedicated server provisioning queued',
+          paymentStatus: 'not_billable_yet',
+        });
+      }
+
+      try {
+        const vpsResult = await publishStaticSiteToVps({
+        deploymentId: deployment.deploymentId,
+        sourceDir: imported.localDir,
+        serviceType: project.serviceType,
+        buildCommand: shell.buildCommand,
+        publishDirectory: project.publishDirectory,
+      });
+      await addDeploymentLog(deployment.deploymentId, `Published to Glondia hosting server: ${vpsResult.liveUrl}`, 'ok', {
+        provider: 'vps',
+        publicPath: vpsResult.publicPath,
+        publishDirectory: vpsResult.publishDirectory,
+      });
+
+        return updateDeploymentRecord(deployment.deploymentId, {
+        ...baseUpdate,
+        provider: 'vps',
+        platformDeployed: true,
+        status: 'live',
+        buildStatus: 'succeeded',
+        currentStep: 'Live on Glondia hosting server',
+        paymentStatus: 'billing_pending',
+        subscriptionStatus: 'trial_pending',
+        billingAttachStatus: 'queued',
+        renderServiceId: vpsResult.serviceId,
+        renderDeployId: vpsResult.deployId,
+        providerServiceId: vpsResult.serviceId,
+        providerDeployId: vpsResult.deployId,
+        providerStatus: vpsResult.providerStatus,
+        liveUrl: vpsResult.liveUrl,
+        verifiedUrl: vpsResult.liveUrl,
+        urlReachable: true,
+        vpsHosting: vpsResult,
+        render: null,
+        errorMessage: null,
+        lastDeployedAt: new Date().toISOString(),
+        });
+      } catch (primaryError) {
+        if (!renderApiService.configured()) throw primaryError;
+        await updateDeploymentRecord(deployment.deploymentId, {
+          providerFailover: {
+            from: 'vps',
+            to: 'render',
+            reason: primaryError.message,
+            stage: primaryError.stage || 'vps_publish',
+            occurredAt: new Date().toISOString(),
+          },
+          currentStep: 'Retrying deployment',
+          buildStatus: 'retrying',
+        });
+      }
+    }
 
     // Capability check: we can publish to a controlled repo if we have a usable
     // credential (GitHub App or non-PEM PAT) AND a controlled target (a creatable
@@ -197,25 +319,27 @@ export async function run(input = {}, context = {}) {
       const settings = renderApiService.settings();
       return ready(
         deployment.deploymentId,
-        'Ready - missing Render credentials',
-        `Configure ${settings.required.join(', ')} to deploy the controlled repo to Render.`,
+        'Hosting temporarily unavailable',
+        'Glondia could not start the fallback hosting route. Contact support.',
         baseUpdate,
       );
     }
 
-    await addDeploymentLog(deployment.deploymentId, 'Render configured — creating service from controlled repo and triggering deploy.', 'info');
+    await addDeploymentLog(deployment.deploymentId, 'Creating hosting service and triggering deployment.', 'info');
     const renderResult = await createAndTriggerRenderDeploy({
       ...renderPayload,
       renderPlanIntent,
       // Pin the deploy to the freshly published commit when available.
       ...(controlledRepo.commitId ? { commitId: controlledRepo.commitId } : {}),
     });
-    await addDeploymentLog(deployment.deploymentId, `Render service ${renderResult.serviceId} created and deploy ${renderResult.deployId} triggered.`, 'ok', {
+    await addDeploymentLog(deployment.deploymentId, `Hosting deployment ${renderResult.deployId} started.`, 'ok', {
       renderServiceId: renderResult.serviceId,
+      internalProvider: 'render',
     });
 
     const updated = await updateDeploymentRecord(deployment.deploymentId, {
       ...baseUpdate,
+      provider: 'render',
       // Render handoff succeeded → real, billable platform deployment.
       platformDeployed: true,
       status: 'building',
@@ -226,6 +350,8 @@ export async function run(input = {}, context = {}) {
       billingAttachStatus: 'queued',
       renderServiceId: renderResult.serviceId,
       renderDeployId: renderResult.deployId,
+      providerServiceId: renderResult.serviceId,
+      providerDeployId: renderResult.deployId,
       providerStatus: renderResult.providerStatus,
       liveUrl: renderResult.liveUrl,
       render: {

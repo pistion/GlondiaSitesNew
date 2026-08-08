@@ -7,6 +7,11 @@ export function createProjectActions({
   readLocalDb,
 }) {
   return {
+    async listProjects() {
+      const projects = await apiRequest('/projects');
+      return projects.map(mapApiProject);
+    },
+
     async listProjectServiceTypes() {
       return apiRequest('/projects/service-types');
     },
@@ -15,6 +20,24 @@ export function createProjectActions({
       const project = await apiRequest('/projects', { method: 'POST', body: JSON.stringify(input) });
       notifyDataChanged();
       return mapApiProject(project);
+    },
+
+    async getProject(projectId) {
+      const project = await apiRequest(`/projects/${encodeURIComponent(projectId)}`);
+      return mapApiProject(project);
+    },
+
+    async getProjectSummary(projectId) {
+      return apiRequest(`/projects/${encodeURIComponent(projectId)}/summary`);
+    },
+
+    async manageProjectService(projectId, serviceType, serviceId, action, input = {}) {
+      const result = await apiRequest(`/projects/${encodeURIComponent(projectId)}/services/${encodeURIComponent(serviceType)}/${encodeURIComponent(serviceId)}/actions`, {
+        method: 'POST',
+        body: JSON.stringify({ ...input, action }),
+      });
+      notifyDataChanged();
+      return result;
     },
 
     async updateProject(projectId, input) {

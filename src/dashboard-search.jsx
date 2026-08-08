@@ -187,6 +187,18 @@ function SearchPalette({ navigate, onClose }) {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
   useEffect(() => { setSelected(0); }, [query]);
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2 || loading) return undefined;
+    const timer = window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('glondia:ux-search', { detail: {
+        query: q.slice(0, 120),
+        resultCount: flat.length,
+        resultTypes: groups.map((group) => group.label).slice(0, 10),
+      } }));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [query, loading, flat.length, groups]);
 
   // Keep the keyboard selection in view while arrowing through results.
   useEffect(() => {

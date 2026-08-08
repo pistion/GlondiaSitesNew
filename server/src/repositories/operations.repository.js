@@ -45,7 +45,7 @@ export async function listWatchdogEventsForCustomer(userId, organizationIds = []
 
 export async function listNotificationsForCustomer(userId, { limit = 50 } = {}) {
   return prisma.notification.findMany({
-    where: { userId, deletedAt: null },
+    where: { userId, deletedAt: null, audience: { not: 'admin' } },
     orderBy: { createdAt: 'desc' },
     take: Number(limit),
   });

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from './db.js';
@@ -8,8 +8,8 @@ const DEV_JWT_SECRET = 'glondia-dev-insecure-jwt-secret-change-me';
 const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || '15m';
 const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 30);
 const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 10);
-// The first N registered users are eligible for the K50 launch promo.
-const PROMO_SIGNUP_LIMIT = Number(process.env.DEPLOYMENT_PROMO_SIGNUP_LIMIT || process.env.DEPLOYMENT_PROMO_LIMIT || 20);
+const JWT_ISSUER = process.env.JWT_ISSUER || 'glondia-sites';
+const JWT_AUDIENCE = process.env.JWT_AUDIENCE || 'glondia-dashboard';
 
 /**
  * Resolve the JWT signing secret. In production a real secret MUST be supplied;
@@ -44,12 +44,22 @@ export function signAccessToken(user) {
   return jwt.sign(
     { sub: user.id, email: user.email, role: user.role || 'owner', name: user.name || null },
     getJwtSecret(),
-    { expiresIn: ACCESS_TOKEN_TTL },
+    {
+      algorithm: 'HS256',
+      expiresIn: ACCESS_TOKEN_TTL,
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
+      jwtid: randomUUID(),
+    },
   );
 }
 
 export function verifyAccessToken(token) {
-  return jwt.verify(token, getJwtSecret());
+  return jwt.verify(token, getJwtSecret(), {
+    algorithms: ['HS256'],
+    issuer: JWT_ISSUER,
+    audience: JWT_AUDIENCE,
+  });
 }
 
 // ─── Refresh tokens (opaque, DB-backed, hashed + rotated) ──────────────────────
@@ -89,6 +99,10 @@ async function rotateRefreshToken(rawToken) {
 // as a blob (Authorization header required) — it is NOT a public URL, and the
 // raw avatarPath/idPhotoPath SSD paths are never exposed.
 const OWN_AVATAR_URL = '/api/v1/auth/profile/avatar';
+
+function staleSessionError() {
+  return httpError('Your session no longer matches an account. Please sign in again.', 401);
+}
 
 function toPublicUser(user) {
   const details = safeJson(user.profileDetails);
@@ -166,25 +180,14 @@ export async function registerUser({ email, password, name, organizationName, si
 
   const passwordHash = await hashPassword(password);
 
-  // Compute the signup rank and promo eligibility inside a transaction to keep
-  // the rank consistent under concurrent registrations. Promo eligibility is a
-  // registration-order property — the first PROMO_SIGNUP_LIMIT users qualify —
-  // NOT a function of paid orders.
-  let user = await prisma.$transaction(async (tx) => {
-    const priorCount = await tx.user.count();
-    const signupRank = priorCount + 1;
-    const promoEligible = signupRank <= PROMO_SIGNUP_LIMIT;
-    const orgName = String(organizationName || '').trim() || null;
-    return tx.user.create({
-      data: {
-        email: normalizedEmail,
-        passwordHash,
-        name: String(name || '').trim() || null,
-        profileDetails: JSON.stringify({ organizationName: orgName }),
-        promoSignupRank: signupRank,
-        promoEligible,
-      },
-    });
+  const orgName = String(organizationName || '').trim() || null;
+  let user = await prisma.user.create({
+    data: {
+      email: normalizedEmail,
+      passwordHash,
+      name: String(name || '').trim() || null,
+      profileDetails: JSON.stringify({ organizationName: orgName }),
+    },
   });
 
   // Every new account gets a glondiac-XXXX client reference tied to signup IP.
@@ -254,9 +257,41 @@ function safeJson(text) {
   try { return JSON.parse(text || '{}'); } catch { return {}; }
 }
 
+const BILLING_INFO_KEYS = [
+  'billingName',
+  'billingEmail',
+  'companyName',
+  'taxId',
+  'country',
+  'currency',
+  'recurringBillingEnabled',
+  'billingCycle',
+];
+
+function sanitizeBillingInfo(input = {}, { validate = false } = {}) {
+  const out = {};
+  for (const key of BILLING_INFO_KEYS) {
+    const max = key === 'addressLine2' ? 160 : 120;
+    const value = input?.[key];
+    out[key] = value == null ? null : String(value).trim().slice(0, max) || null;
+  }
+  if (validate && out.billingEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.billingEmail)) {
+    throw httpError('Enter a valid billing email address.', 400);
+  }
+  if (out.currency) out.currency = out.currency.toUpperCase().slice(0, 3);
+  out.recurringBillingEnabled = input?.recurringBillingEnabled === true
+    || String(input?.recurringBillingEnabled || '').toLowerCase() === 'true';
+  if (out.billingCycle) {
+    const cycle = String(out.billingCycle).toLowerCase();
+    out.billingCycle = ['monthly', 'annual'].includes(cycle) ? cycle : null;
+  }
+  return out;
+}
+
 /** Profile shape returned to the account owner — never exposes the raw idPhotoPath. */
 function toProfile(user) {
   const details = safeJson(user.profileDetails);
+  const billingInfo = sanitizeBillingInfo(details.billingInfo || {});
   return {
     id: user.id,
     clientId: user.clientId || null,
@@ -268,6 +303,7 @@ function toProfile(user) {
     planId: user.planId,
     accountStatus: user.accountStatus || 'active',
     profileDetails: details,
+    billingInfo,
     hasAvatar: Boolean(user.avatarPath),
     avatarUrl: user.avatarPath ? OWN_AVATAR_URL : null,
     hasIdPhoto: Boolean(user.idPhotoPath),
@@ -286,7 +322,7 @@ export async function updateUserProfile(userId, patch = {}) {
   if (!userId || userId === 'local-user') throw httpError('A real account is required.', 401);
 
   const existing = await prisma.user.findUnique({ where: { id: userId } });
-  if (!existing) throw httpError('User not found.', 404);
+  if (!existing) throw staleSessionError();
 
   const data = {};
   if (patch.name !== undefined) data.name = patch.name ? String(patch.name).trim().slice(0, 200) : null;
@@ -309,6 +345,22 @@ export async function updateUserProfile(userId, patch = {}) {
         ...incoming.displayPreferences,
       };
     }
+    if (incoming.billingInfo && typeof incoming.billingInfo === 'object') {
+      nextDetails.billingInfo = {
+        ...sanitizeBillingInfo(prevDetails.billingInfo || {}),
+        ...sanitizeBillingInfo(incoming.billingInfo, { validate: true }),
+      };
+    }
+    detailsDirty = true;
+  }
+  if (patch.billingInfo !== undefined) {
+    nextDetails.billingInfo = {
+      ...sanitizeBillingInfo(prevDetails.billingInfo || {}),
+      ...sanitizeBillingInfo(
+        typeof patch.billingInfo === 'string' ? safeJson(patch.billingInfo) : (patch.billingInfo || {}),
+        { validate: true }
+      ),
+    };
     detailsDirty = true;
   }
   if (patch.organizationName !== undefined) {
@@ -334,6 +386,8 @@ export async function updateUserProfile(userId, patch = {}) {
 /** Record the SSD path of the caller's own uploaded ID photo. */
 export async function setOwnIdPhotoPath(userId, filePath) {
   if (!userId || userId === 'local-user') throw httpError('A real account is required.', 401);
+  const existing = await prisma.user.findUnique({ where: { id: userId } });
+  if (!existing) throw staleSessionError();
   const user = await prisma.user.update({ where: { id: userId }, data: { idPhotoPath: filePath } });
   return toProfile(user);
 }
@@ -345,7 +399,7 @@ export async function changePassword(userId, currentPassword, newPassword) {
     throw httpError('New password must be at least 8 characters.', 400);
   }
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) throw httpError('User not found.', 404);
+  if (!user) throw staleSessionError();
   if (user.passwordHash) {
     if (!currentPassword) throw httpError('Current password is required.', 400);
     const valid = await verifyPassword(currentPassword, user.passwordHash);
@@ -367,7 +421,7 @@ export async function updateUserEmail(userId, newEmail, currentPassword) {
     throw httpError('A valid email address is required.', 400);
   }
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) throw httpError('User not found.', 404);
+  if (!user) throw staleSessionError();
   if (user.passwordHash) {
     if (!currentPassword) throw httpError('Current password is required.', 400);
     const valid = await verifyPassword(currentPassword, user.passwordHash);
@@ -387,7 +441,7 @@ export async function updateUserEmail(userId, newEmail, currentPassword) {
 export async function deleteOwnAccount(userId, currentPassword) {
   if (!userId || userId === 'local-user') throw httpError('A real account is required.', 401);
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) throw httpError('User not found.', 404);
+  if (!user) throw staleSessionError();
   if (user.passwordHash) {
     if (!currentPassword) throw httpError('Current password is required.', 400);
     const valid = await verifyPassword(currentPassword, user.passwordHash);
@@ -407,6 +461,8 @@ export async function deleteOwnAccount(userId, currentPassword) {
 /** Record the SSD path of the caller's own profile avatar/headshot. */
 export async function setOwnAvatarPath(userId, filePath) {
   if (!userId || userId === 'local-user') throw httpError('A real account is required.', 401);
+  const existing = await prisma.user.findUnique({ where: { id: userId } });
+  if (!existing) throw staleSessionError();
   const user = await prisma.user.update({ where: { id: userId }, data: { avatarPath: filePath } });
   return toProfile(user);
 }

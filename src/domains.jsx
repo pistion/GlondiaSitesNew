@@ -3,9 +3,10 @@ import React, { useEffect, useRef, useState as useStateD } from 'react';
 import { ICN } from './icons';
 import { GD } from './data';
 import { StatusBadge, Tabs, Stat, Badge, Empty, ToggleRow } from './components';
-import { bulkDeleteDnsRecords, captureDomainPayPalOrder, checkDomainAvailability, createDnsRecord, createDomain, createDomainPayPalOrder, deleteDnsRecord, exportZoneFile, getPayPalClientSettings, getRegistrarOperation, getRegistrarSettings, importZoneFile, pullDnsFromSpaceship, pushDnsToSpaceship, ttlToSeconds, updateDnsRecord, updateNameservers, verifyDomain } from './api';
+import { activateCustomerDomainAddon, bulkDeleteDnsRecords, captureDomainAddonPayPalOrder, captureDomainPayPalOrder, checkDomainAvailability, createDnsRecord, createDomain, createDomainAddonPayPalOrder, createDomainPayPalOrder, deleteDnsRecord, exportZoneFile, getCustomerDomainProviderAccess, getCustomerDomainSettings, getPayPalClientSettings, getRegistrarOperation, getRegistrarSettings, getStoredAuth, importZoneFile, pullDnsFromSpaceship, pushDnsToSpaceship, syncCustomerDomains, ttlToSeconds, updateDnsRecord, updateNameservers, validateDomainCart, verifyDomain } from './api';
 import { useDnsRecords, useDomains } from './use-domains';
 import { isLiveMode } from './app/config.js';
+import SandboxBanner from './features/sandbox/SandboxBanner.jsx';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SKELETON ROWS
@@ -44,8 +45,33 @@ function DnsSkeletonRow({ delay = 0 }) {
 export function DomainsMine({ navigate }) {
   const { domains, loading, source, error, providerConfigured } = useDomains();
   const [verifyingId, setVerifyingId] = useStateD(null);
+  const [providerAccess, setProviderAccess] = useStateD(null);
+  const [syncingProvider, setSyncingProvider] = useStateD('');
+  const [syncMessage, setSyncMessage] = useStateD('');
   const connectedCount = domains.filter(d => d.linkedProject).length;
   const canBuy = providerConfigured !== false;
+  const isProviderClient = getStoredAuth().user?.clientId === 'glondiac-4108';
+
+  useEffect(() => {
+    if (!isProviderClient || !isLiveMode()) return;
+    getCustomerDomainProviderAccess()
+      .then(setProviderAccess)
+      .catch(() => setProviderAccess(null));
+  }, [isProviderClient]);
+
+  const syncProvider = async (provider) => {
+    setSyncingProvider(provider);
+    setSyncMessage('');
+    try {
+      const result = await syncCustomerDomains(provider);
+      const label = provider === 'domains' ? 'Glondia domain' : 'Glondia protection';
+      setSyncMessage(`${result.imported} ${label}${result.imported === 1 ? '' : 's'} synced to this account.`);
+    } catch (syncError) {
+      setSyncMessage(syncError.message || `Could not sync ${provider}.`);
+    } finally {
+      setSyncingProvider('');
+    }
+  };
 
   return (
     <>
@@ -56,22 +82,54 @@ export function DomainsMine({ navigate }) {
           <p className="sub">Manage every domain you've registered or transferred to Glondia. Link them to projects, edit DNS, set up renewals.</p>
         </div>
         <div className="actions">
-          <button
-            className="btn btn-primary"
-            disabled={!canBuy}
-            title={canBuy ? undefined : 'Domain registration is not configured yet.'}
-            onClick={() => canBuy && navigate({ view: "domains-buy" })}
-          >
-            <ICN.Plus size={14} /> Buy a domain
-          </button>
+          {providerAccess?.services?.domains?.configured && (
+            <button className="btn btn-outline" disabled={Boolean(syncingProvider)} onClick={() => syncProvider('domains')}>
+              <ICN.Refresh size={14} /> {syncingProvider === 'domains' ? 'Syncing domains...' : 'Sync domains'}
+            </button>
+          )}
+          {providerAccess?.services?.protection?.configured && (
+            <button className="btn btn-outline" disabled={Boolean(syncingProvider)} onClick={() => syncProvider('protection')}>
+              <ICN.Refresh size={14} /> {syncingProvider === 'protection' ? 'Syncing protection...' : 'Sync protection'}
+            </button>
+          )}
+          {!loading && domains.length > 0 && (
+            <button
+              className="btn btn-primary"
+              disabled={!canBuy}
+              title={canBuy ? undefined : 'Domain registration is not configured yet.'}
+              onClick={() => canBuy && navigate({ view: "domains-buy" })}
+            >
+              <ICN.Plus size={14} /> Buy a domain
+            </button>
+          )}
         </div>
       </div>
+
+      <SandboxBanner service="domains-mine" />
+
+      {isProviderClient && (
+        <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+          <div className="row between" style={{ gap: 12, alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontWeight: 650, marginBottom: 5 }}>Glondia domain services</div>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                Glondia handles registration, DNS, security, and domain add-ons. All infrastructure credentials remain securely on the server.
+              </p>
+            </div>
+            <div className="row" style={{ gap: 6 }}>
+              <Badge tone={providerAccess?.services?.domains?.configured ? 'success' : 'muted'}>Glondia Domains</Badge>
+              <Badge tone={providerAccess?.services?.protection?.configured ? 'success' : 'muted'}>Glondia Protection</Badge>
+            </div>
+          </div>
+          {syncMessage && <div style={{ marginTop: 10, fontSize: 13 }}>{syncMessage}</div>}
+        </div>
+      )}
 
       {providerConfigured === false && (
         <div className="card" style={{ padding: 18, marginBottom: 16 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Domain registration is not configured yet.</div>
           <p className="muted" style={{ margin: 0, fontSize: 13, maxWidth: 56 + 'ch' }}>
-            Your administrator needs to connect a domain registrar (Spaceship) and PayPal on the server before domains can be searched or purchased. No provider secrets are available in this browser.
+            Your administrator needs to enable Glondia Domains and payments before domains can be searched or purchased. No service credentials are available in this browser.
           </p>
         </div>
       )}
@@ -94,7 +152,7 @@ export function DomainsMine({ navigate }) {
         </div>
       )}
 
-      <div className="card card-flush">
+      <div className="card card-flush dns-records-card">
         <div className="card-head">
           <h2>My domains</h2>
           <div className="row" style={{ gap: 8 }}>
@@ -161,9 +219,12 @@ export function DomainsMine({ navigate }) {
                   )}
                   <button className="btn btn-sm btn-ghost"
                           onClick={() => navigate({ view: "dns", params: { domain: d.name } })}>
-                    <ICN.Network size={14} /> DNS settings
+                    <ICN.Network size={14} /> Records
                   </button>
-                  <button className="btn btn-sm btn-ghost"><ICN.Settings size={14} /></button>
+                  <button className="btn btn-sm btn-ghost" title="Domain settings"
+                          onClick={() => navigate({ view: "dns", params: { domain: d.name, section: "settings" } })}>
+                    <ICN.Settings size={14} />
+                  </button>
                 </td>
               </tr>
             ))}
@@ -330,6 +391,7 @@ export function DomainsBuy({ navigate }) {
   const [operations, setOperations] = useStateD([]); // [{ domain, operationId, status }]
   const [paidAmounts, setPaidAmounts] = useStateD(null); // amounts returned by capture
   const [providerReady, setProviderReady] = useStateD(null); // null loading | true | false
+  const [checkoutReady, setCheckoutReady] = useStateD(false);
   const [providerMessage, setProviderMessage] = useStateD('');
   const [searchTransitioning, setSearchTransitioning] = useStateD(false);
   const searchTimerRef = useRef(null);
@@ -356,15 +418,18 @@ export function DomainsBuy({ navigate }) {
           return;
         }
         if (!paypal?.configured) {
-          setProviderReady(false);
+          setProviderReady(true);
+          setCheckoutReady(false);
           setProviderMessage('Checkout is unavailable until PayPal is configured on the server.');
           return;
         }
         setProviderReady(true);
+        setCheckoutReady(true);
         setProviderMessage('');
       } catch {
         if (!cancelled) {
           setProviderReady(false);
+          setCheckoutReady(false);
           setProviderMessage('Domain registration is not configured yet.');
         }
       }
@@ -378,8 +443,11 @@ export function DomainsBuy({ navigate }) {
 
   const addToCart = (item) => {
     if (providerReady !== true) return;
-    if (cart.find(c => c.name === item.name)) return;
-    setCart([...cart, item]);
+    setCart((current) => (
+      current.find(c => c.name === item.name)
+        ? current
+        : [...current, item]
+    ));
   };
   const removeFromCart = (name) => setCart(cart.filter(c => c.name !== name));
   const subtotal = cart.reduce((a, c) => a + c.price, 0);
@@ -429,7 +497,7 @@ export function DomainsBuy({ navigate }) {
           <div className="page-eyebrow">Domains / Buy a domain</div>
           <h1>{step === "checkout" ? "Checkout" : step === "done" ? "All set" : "Find your domain"}</h1>
           {step !== "done" && <p className="sub">
-            Search across 340+ TLDs at registrar prices. WHOIS privacy and auto-renew included.
+            Search live registrar availability across curated TLDs. WHOIS privacy and auto-renew included.
           </p>}
         </div>
         {step !== "done" && (
@@ -446,6 +514,8 @@ export function DomainsBuy({ navigate }) {
         )}
       </div>
 
+      <SandboxBanner service="domains-buy" />
+
       {providerReady === null && (
         <div className="card muted" style={{ padding: '12px 16px', marginBottom: 16, fontSize: 13 }}>
           Checking domain provider readiness…
@@ -455,7 +525,7 @@ export function DomainsBuy({ navigate }) {
         <div className="card" style={{ padding: 16, marginBottom: 16 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Domain registration is not fully configured yet</div>
           <p className="muted" style={{ margin: 0, fontSize: 13, maxWidth: 60 + 'ch' }}>
-            {providerMessage || 'Connect Spaceship and PayPal on the server to enable live search and checkout. You can still open this page and review the buy flow.'}
+            {providerMessage || 'Enable Glondia Domains and payments on the server to use live search and checkout.'}
           </p>
         </div>
       )}
@@ -469,6 +539,9 @@ export function DomainsBuy({ navigate }) {
           onSearch={beginSearch}
           searchDisabled={providerReady === null || searchTransitioning}
           searching={searchTransitioning}
+          providerReady={providerReady}
+          checkoutReady={checkoutReady}
+          providerMessage={providerMessage}
         />
       )}
       {step === "results" && (
@@ -479,7 +552,7 @@ export function DomainsBuy({ navigate }) {
           removeFromCart={removeFromCart}
           selectedTld={selectedTld}
           onBack={() => setStep("search")}
-          onCheckout={() => canCheckout && setStep("checkout")}
+          onCheckout={() => cart.length > 0 && canCheckout && setStep("checkout")}
           checkoutEnabled={canCheckout}
         />
       )}
@@ -501,7 +574,7 @@ export function DomainsBuy({ navigate }) {
             <Empty
               icon="Cart"
               title="Checkout unavailable"
-              body={providerMessage || 'Domain checkout requires Spaceship and PayPal on the server.'}
+              body={providerMessage || 'Domain checkout requires Glondia Domains and payments to be enabled.'}
               action={
                 <button className="btn btn-primary" onClick={() => setStep('search')}>
                   Back to search
@@ -525,7 +598,18 @@ export function DomainsBuy({ navigate }) {
   );
 }
 
-function SearchPanel({ query, setQuery, selectedTld, setSelectedTld, onSearch, searchDisabled = false, searching = false }) {
+function SearchPanel({
+  query,
+  setQuery,
+  selectedTld,
+  setSelectedTld,
+  onSearch,
+  searchDisabled = false,
+  searching = false,
+  providerReady = null,
+  checkoutReady = false,
+  providerMessage = '',
+}) {
   const selectedIndex = Math.max(0, FEATURED_TLDS.indexOf(selectedTld));
   const [pushAnimating, setPushAnimating] = useStateD(false);
   const [previousTld, setPreviousTld] = useStateD(null);
@@ -544,7 +628,7 @@ function SearchPanel({ query, setQuery, selectedTld, setSelectedTld, onSearch, s
   return (
     <div className={`dom-hero ${searching ? 'is-searching' : ''}`}>
       <h2>Search for the perfect name.</h2>
-      <p>Type a name, business, or idea. We'll check availability across every TLD.</p>
+      <p>Type a name, business, or idea. We'll check live registrar availability for supported TLDs.</p>
       <form className="dom-search input-group lg" onSubmit={(e) => { e.preventDefault(); if (!searchDisabled && query.trim()) onSearch(); }}>
         <button
           className="tld-push-input"
@@ -586,7 +670,7 @@ function SearchPanel({ query, setQuery, selectedTld, setSelectedTld, onSearch, s
         <span className="row" style={{ gap: 6 }}><ICN.ShieldCheck size={14} /> WHOIS privacy free</span>
         <span className="row" style={{ gap: 6 }}><ICN.Refresh size={14} /> Free auto-renew</span>
         <span className="row" style={{ gap: 6 }}><ICN.Zap size={14} /> One-click to your projects</span>
-        <span className="row" style={{ gap: 6 }}><ICN.Globe size={14} /> 340+ TLDs supported</span>
+        <span className="row" style={{ gap: 6 }}><ICN.Globe size={14} /> Live Glondia availability</span>
       </div>
     </div>
   );
@@ -756,7 +840,7 @@ function SearchResults({ query, cart, addToCart, removeFromCart, selectedTld, on
         </div>
 
         <div className="muted" style={{ fontSize: 12.5 }}>
-          Prices shown in USD · WHOIS privacy included free
+          Prices shown in USD. Availability and final pricing are checked live through Glondia.
         </div>
       </div>
 
@@ -793,13 +877,13 @@ function SearchResults({ query, cart, addToCart, removeFromCart, selectedTld, on
               style={{ width: "100%", marginTop: 14 }}
               onClick={onCheckout}
               disabled={!checkoutEnabled}
-              title={checkoutEnabled ? undefined : 'Checkout requires Spaceship and PayPal on the server'}
+              title={checkoutEnabled ? undefined : 'Checkout requires the domain provider on the server'}
             >
               Continue to checkout <ICN.ArrowRight size={14} />
             </button>
             {!checkoutEnabled && (
               <p className="muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-                Live checkout is unavailable until the domain provider is configured.
+                Checkout is unavailable until the domain provider is configured.
               </p>
             )}
           </>
@@ -869,24 +953,78 @@ const COUNTRIES = [
 function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onPaid, busy, error }) {
   const [pay, setPay] = useStateD("paypal");
   const [quote, setQuote] = useStateD(null);
+  const [quoteLoading, setQuoteLoading] = useStateD(false);
+  const [quoteError, setQuoteError] = useStateD('');
   const [paypalError, setPaypalError] = useStateD('');
   const set = (field) => (e) => setContact(prev => ({ ...prev, [field]: e.target.value }));
+
+  const quotePayload = () => ({
+    domains: cart.map((item) => ({ name: item.name, years: 1 })),
+  });
+
+  const refreshQuote = async () => {
+    if (!cart.length) return null;
+    setQuoteLoading(true);
+    setQuoteError('');
+    try {
+      const nextQuote = await validateDomainCart(quotePayload());
+      setQuote(nextQuote);
+      return nextQuote;
+    } catch (err) {
+      const message = err.message || 'Could not validate this cart against live registrar availability.';
+      setQuoteError(message);
+      setQuote(null);
+      throw err;
+    } finally {
+      setQuoteLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!cart.length) return undefined;
+    setQuoteLoading(true);
+    setQuoteError('');
+    validateDomainCart(quotePayload())
+      .then((nextQuote) => { if (!cancelled) setQuote(nextQuote); })
+      .catch((err) => {
+        if (!cancelled) {
+          setQuote(null);
+          setQuoteError(err.message || 'Could not validate this cart against live registrar availability.');
+        }
+      })
+      .finally(() => { if (!cancelled) setQuoteLoading(false); });
+    return () => { cancelled = true; };
+  }, [cart.map((item) => item.name).join('|')]);
 
   // Basic required-field validation before submit
   const required = ['firstName', 'lastName', 'email', 'phone', 'address1', 'city', 'postalCode', 'country'];
   const missing = required.filter(f => !contact[f].trim());
   const phoneOk = /^\+\d{1,3}\.\d{4,14}$/.test(contact.phone.trim());
-  const canSubmit = cart.length > 0 && missing.length === 0 && phoneOk;
+  const cartValid = quote?.valid === true && !quoteError;
+  const canSubmit = cart.length > 0 && missing.length === 0 && phoneOk && cartValid && !quoteLoading;
   const estimatedMarkup = quote?.amounts?.markupAmount ?? (subtotal * 0.3).toFixed(2);
   const estimatedTotal = quote?.amounts?.totalAmount ?? (subtotal * 1.3).toFixed(2);
 
   return (
-    <div className="grid-side" style={{ alignItems: "flex-start" }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div className="card">
-          <div className="row between" style={{ marginBottom: 16 }}>
-            <h2 style={{ margin: 0 }}>1. Registrant information</h2>
-            <Badge tone="info" dot={false}>WHOIS privacy hides these details publicly</Badge>
+    <div className="domain-checkout-page">
+      <section className="domain-checkout-main">
+        <div className="domain-checkout-card domain-checkout-intro">
+          <button className="btn btn-outline btn-sm" onClick={onBack}><ICN.ArrowLeft size={14} /> Back to results</button>
+          <div>
+            <h2>Checkout details</h2>
+            <p className="muted">Add the registrant contact once. Glondia keeps WHOIS privacy enabled and verifies the cart again before payment.</p>
+          </div>
+          <Badge tone="info" dot={false}>Private registration included</Badge>
+        </div>
+
+        <div className="domain-checkout-card">
+          <div className="domain-checkout-card-head">
+            <div>
+              <span className="domain-checkout-step">1</span>
+              <h3>Registrant information</h3>
+            </div>
+            <span className="muted">Required for domain ownership</span>
           </div>
           <div className="grid-2">
             <div>
@@ -952,37 +1090,14 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
           </div>
         </div>
 
-        <div className="card">
-          <h2 style={{ marginTop: 0, marginBottom: 16 }}>2. Payment</h2>
-          <div className="row" style={{ gap: 10, marginBottom: 18 }}>
-            <PayPill icon="CreditCard" label="PayPal" active={pay === "paypal"} onClick={() => setPay("paypal")} />
-            <PayPill icon="Cube" label="Bank transfer" active={pay === "bank"} onClick={() => setPay("bank")} />
+        <div className="domain-checkout-card">
+          <div className="domain-checkout-card-head">
+            <div>
+              <span className="domain-checkout-step">2</span>
+              <h3>Setup options</h3>
+            </div>
+            <span className="muted">Applied after checkout</span>
           </div>
-          {pay === "paypal" && (
-            <PayPalCheckoutButton
-              disabled={!canSubmit || busy}
-              createOrder={() => createDomainPayPalOrder({
-                domains: cart.map((item) => ({ name: item.name, years: 1 })),
-                contact,
-                autoRenew: true,
-                privacyProtection: true,
-              }).then((order) => {
-                setQuote(order);
-                return order;
-              })}
-              captureOrder={captureDomainPayPalOrder}
-              onPaid={onPaid}
-              onError={(message) => setPaypalError(message)}
-            />
-          )}
-          {pay === "bank" && (
-            <p className="muted">We'll email payment instructions for bank transfer in USD or PGK. Domain registration begins once the transfer clears.</p>
-          )}
-          {paypalError && <p style={{ color: 'var(--danger)', fontSize: 13 }}>{paypalError}</p>}
-        </div>
-
-        <div className="card">
-          <h2 style={{ marginTop: 0, marginBottom: 16 }}>3. Setup options</h2>
           <ToggleRow label="Enable auto-renew" sub="We'll renew before expiry and email a receipt." defaultOn />
           <ToggleRow label="Enable WHOIS privacy" sub="Hide your registrant details from public lookups. Free with every domain." defaultOn />
           <ToggleRow label="Use Glondia nameservers" sub="Recommended — gives you DNS management inside this workspace." defaultOn />
@@ -992,11 +1107,18 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
         <div className="row" style={{ gap: 10 }}>
           <button className="btn btn-outline" onClick={onBack}><ICN.ArrowLeft size={14} /> Back to results</button>
         </div>
-      </div>
+      </section>
 
       {/* Sticky summary */}
-      <div className="card" style={{ position: "sticky", top: 80 }}>
-        <h2 style={{ marginTop: 0 }}>Order summary</h2>
+      <aside className="domain-checkout-summary">
+      <div className="domain-checkout-card">
+        <div className="domain-checkout-card-head">
+          <div>
+            <span className="domain-checkout-step">Review</span>
+            <h3>Order summary</h3>
+          </div>
+          <Badge tone={cartValid ? "success" : "info"} dot={false}>{cartValid ? "Verified" : "Checking"}</Badge>
+        </div>
         {cart.length === 0
           ? <Empty icon="Cart" title="Your cart is empty" />
           : (
@@ -1010,8 +1132,25 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
                   <span style={{ fontFamily: "var(--serif)", fontSize: 18 }}>${c.price.toFixed(2)}</span>
                 </div>
               ))}
+              {quoteLoading && (
+                <div className="muted row" style={{ gap: 6, fontSize: 12, marginTop: 10 }}>
+                  <span className="anim-spin" style={{ display: 'inline-flex' }}><ICN.Refresh size={12} /></span>
+                  Checking live registrar availability...
+                </div>
+              )}
+              {quote?.checkedAt && !quoteLoading && (
+                <div className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
+                  Live cart verified by Glondia at {new Date(quote.checkedAt).toLocaleTimeString()}.
+                </div>
+              )}
+              {quoteError && (
+                <div style={{ color: "var(--danger)", fontSize: 13, marginTop: 12, padding: '10px 12px', background: 'var(--bg-deep)', borderRadius: 'var(--r-sm)', border: '1px solid var(--danger)' }}>
+                  <ICN.AlertCircle size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+                  {quoteError}
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
-                <div className="row between"><span className="muted">Domain price</span><span>${subtotal.toFixed(2)}</span></div>
+                <div className="row between"><span className="muted">Domain price</span><span>${quote?.amounts?.actualAmount ?? subtotal.toFixed(2)}</span></div>
                 <div className="row between"><span className="muted">WHOIS privacy</span><span style={{ color: "var(--accent)" }}>Free</span></div>
                 <div className="row between"><span className="muted">Platform/service fee</span><span>${estimatedMarkup}</span></div>
               </div>
@@ -1019,6 +1158,39 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
                 <b>Total today</b>
                 <b style={{ fontFamily: "var(--serif)", fontSize: 24 }}>${estimatedTotal}</b>
               </div>
+              <div className="domain-checkout-final">
+                <div className="domain-checkout-payhead">
+                  <span>Payment method</span>
+                  <span className="muted">Final checkout</span>
+                </div>
+                <div className="row domain-checkout-paymethods">
+                  <PayPill icon="CreditCard" label="PayPal" active={pay === "paypal"} onClick={() => setPay("paypal")} />
+                  <PayPill icon="Cube" label="Bank transfer" active={pay === "bank"} onClick={() => setPay("bank")} />
+                </div>
+                {pay === "paypal" && (
+                  <PayPalCheckoutButton
+                    disabled={!canSubmit || busy}
+                    createOrder={async () => {
+                      await refreshQuote();
+                      const order = await createDomainPayPalOrder({
+                        domains: cart.map((item) => ({ name: item.name, years: 1 })),
+                        contact,
+                        autoRenew: true,
+                        privacyProtection: true,
+                      });
+                      setQuote(order);
+                      return order;
+                    }}
+                    captureOrder={captureDomainPayPalOrder}
+                    onPaid={onPaid}
+                    onError={(message) => setPaypalError(message)}
+                  />
+                )}
+                {pay === "bank" && (
+                  <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>We'll email payment instructions for bank transfer in USD or PGK. Domain registration begins once the transfer clears.</p>
+                )}
+              </div>
+              {paypalError && <p style={{ color: 'var(--danger)', fontSize: 13 }}>{paypalError}</p>}
               {error && (
                 <div style={{ color: "var(--danger)", fontSize: 13, marginTop: 12, padding: '10px 12px', background: 'var(--bg-deep)', borderRadius: 'var(--r-sm)', border: '1px solid var(--danger)' }}>
                   <ICN.AlertCircle size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
@@ -1027,7 +1199,7 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
               )}
               {!canSubmit && !busy && (
                 <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-                  {missing.length > 0 ? 'Fill in all required fields above.' : !phoneOk ? 'Fix the phone number format.' : ''}
+                  {missing.length > 0 ? 'Fill in all required fields above.' : !phoneOk ? 'Fix the phone number format.' : quoteLoading ? 'Checking the live cart before payment.' : quoteError ? 'Update the cart before continuing.' : ''}
                 </p>
               )}
               {pay !== 'paypal' && (
@@ -1042,6 +1214,7 @@ function Checkout({ cart, subtotal, contact, setContact, onBack, onComplete, onP
             </>
           )}
       </div>
+      </aside>
     </div>
   );
 }
@@ -1207,7 +1380,7 @@ function Done({ cart, subtotal, amounts, operations, onNew, onManage }) {
       <p className="muted" style={{ maxWidth: 60 + "ch", margin: "12px auto 0" }}>
         {isOptimistic || allDone
           ? `We've issued the registration${cart.length > 1 ? "s" : ""} and queued DNS setup. SSL certificates will be issued automatically once the domain${cart.length > 1 ? "s point" : " points"} at a project.`
-          : "Spaceship is processing your registration asynchronously — this usually takes a minute. Click \"Check status\" to refresh."}
+          : "Glondia is processing your registration — this usually takes a minute. Click \"Check status\" to refresh."}
       </p>
 
       <div style={{ maxWidth: 480, margin: "32px auto 0", textAlign: "left" }}>
@@ -1360,7 +1533,7 @@ export function DnsEditor({ domain = "", navigate }) {
     setActionError(null);
     try {
       const { pushed } = await pushDnsToSpaceship(managedDomain.id);
-      setSyncMsg(`✓ Pushed ${pushed} record${pushed === 1 ? '' : 's'} to Spaceship`);
+      setSyncMsg(`✓ Published ${pushed} Glondia record${pushed === 1 ? '' : 's'}`);
       setTimeout(() => setSyncMsg(null), 4000);
     } catch (e) { setActionError(e.message); }
     finally { setSyncPushBusy(false); }
@@ -1373,7 +1546,7 @@ export function DnsEditor({ domain = "", navigate }) {
     setActionError(null);
     try {
       const { pulled } = await pullDnsFromSpaceship(managedDomain.id);
-      setSyncMsg(`✓ Pulled ${pulled} record${pulled === 1 ? '' : 's'} from Spaceship`);
+      setSyncMsg(`✓ Refreshed ${pulled} Glondia record${pulled === 1 ? '' : 's'}`);
       setTimeout(() => setSyncMsg(null), 4000);
     } catch (e) { setActionError(e.message); }
     finally { setSyncPullBusy(false); }
@@ -1387,21 +1560,24 @@ export function DnsEditor({ domain = "", navigate }) {
             ← My domains
           </a>
           <h1 style={{ marginTop: 8 }}>
-            Domain settings: <span className="mono" style={{ fontSize: 32, color: "var(--accent)" }}>{domainLabel}</span>
+            DNS records: <span className="mono" style={{ fontSize: 32, color: "var(--accent)" }}>{domainLabel}</span>
           </h1>
-          <p className="sub">Manage DNS records for this purchased domain. Records propagate globally in seconds.</p>
+          <p className="sub">Manage the DNS records stored for this domain. Provider changes synchronize through the backend.</p>
         </div>
         <div className="actions">
+          <button className="btn btn-outline" onClick={() => navigate({ view: "dns", params: { domain: domainLabel, section: "settings" } })}>
+            <ICN.Settings size={14} /> Domain settings
+          </button>
           <button className="btn btn-outline" onClick={() => setShowImport(v => !v)}>
             <ICN.Code size={14} /> Import zone file
           </button>
           {canMutate && (
             <>
-              <button className="btn btn-outline" onClick={handlePullFromSpaceship} disabled={syncPullBusy} title="Pull DNS records from Spaceship registrar into local DB">
+              <button className="btn btn-outline" onClick={handlePullFromSpaceship} disabled={syncPullBusy} title="Refresh DNS records from Glondia">
                 <span className={syncPullBusy ? 'anim-spin' : ''} style={{ display: 'inline-flex' }}><ICN.ArrowLeft size={14} /></span>
                 {syncPullBusy ? ' Pulling…' : ' Pull from registrar'}
               </button>
-              <button className="btn btn-outline" onClick={handlePushToSpaceship} disabled={syncPushBusy} title="Push local DNS records to Spaceship registrar">
+              <button className="btn btn-outline" onClick={handlePushToSpaceship} disabled={syncPushBusy} title="Publish DNS records through Glondia">
                 <span className={syncPushBusy ? 'anim-spin' : ''} style={{ display: 'inline-flex' }}><ICN.ArrowRight size={14} /></span>
                 {syncPushBusy ? ' Pushing…' : ' Push to registrar'}
               </button>
@@ -1419,10 +1595,12 @@ export function DnsEditor({ domain = "", navigate }) {
         </div>
       </div>
 
+      <SandboxBanner service="domains-mine" />
+
       <div className="grid-4">
         <Stat k="Records" v={records.length} d="across all types" />
-        <Stat k="Nameservers" v="Glondia" d="ns1.glondia.app · ns2.glondia.app" />
-        <Stat k="DNSSEC" v="Enabled" d="signed with KSK + ZSK" />
+        <Stat k="Provider" v={managedDomain?.provider || "Pending"} d="stored service provider" />
+        <Stat k="Protected" v={records.filter((record) => record.proxy).length} d="Glondia-protected records" />
         <Stat k="Filtered" v={filtered.length} d={activeTab === "All" ? "showing all" : `type: ${activeTab}`} />
       </div>
 
@@ -1500,16 +1678,16 @@ export function DnsEditor({ domain = "", navigate }) {
                 onSave={(patch) => { update(r.id, patch); setEditing(null); }}
                 onCancel={() => setEditing(null)} />
             ) : (
-              <tr key={r.id} className="dns-anim-row"
-                  style={{ animationDelay: `${i * 0.04}s`, background: selected.has(r.id) ? 'var(--accent-soft)' : undefined }}>
+              <tr key={r.id} className={`dns-anim-row ${selected.has(r.id) ? 'is-selected' : ''}`}
+                  style={{ animationDelay: `${i * 0.04}s` }}>
                 <td>
                   <button className={`chk ${selected.has(r.id) ? 'on' : ''}`} onClick={() => toggleSelect(r.id)}>
                     {selected.has(r.id) && <ICN.Check size={11} stroke={3} />}
                   </button>
                 </td>
-                <td><Badge tone={r.type === "MX" ? "info" : r.type === "TXT" ? "muted" : "success"} dot={false}>{r.type}</Badge></td>
+                <td><span className="dns-record-type">{r.type}</span></td>
                 <td className="mono" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.host}</td>
-                <td className="mono" style={{ wordBreak: "break-all", color: "var(--text)", maxWidth: 280 }}>{r.value}</td>
+                <td className={`mono ${r.value ? '' : 'dns-empty-value'}`} style={{ wordBreak: "break-all", color: "var(--text)", maxWidth: 280 }}>{r.value || 'Not set'}</td>
                 <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{r.ttl}</td>
                 <td><DnsStatusBadge status={r.status} /></td>
                 <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
@@ -1523,37 +1701,490 @@ export function DnsEditor({ domain = "", navigate }) {
         </table>
       </div>
 
-      <div className="grid-2">
-        <div className="card">
-          <h2 style={{ marginTop: 0 }}>Nameservers</h2>
-          <p className="muted" style={{ marginTop: 0 }}>Set these at your registrar if you transferred only DNS to Glondia.</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {["ns1.glondia.app", "ns2.glondia.app", "ns3.glondia.app", "ns4.glondia.app"].map(n => (
-              <div key={n} className="row between" style={{ padding: "10px 14px", background: "var(--bg-deep)", borderRadius: "var(--r-sm)" }}>
-                <span className="mono">{n}</span>
-                <button className="btn btn-sm btn-ghost" onClick={() => navigator.clipboard?.writeText(n)}><ICN.Copy size={14} /></button>
-              </div>
-            ))}
+      <div className="card">
+        <div className="row between" style={{ gap: 16 }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Domain configuration</h2>
+            <p className="muted" style={{ margin: '5px 0 0' }}>Billing, nameservers, DNSSEC, security, bot controls, and health checks are available in Domain settings.</p>
           </div>
-        </div>
-
-        <div className="card">
-          <h2 style={{ marginTop: 0 }}>Email forwarding</h2>
-          <p className="muted" style={{ marginTop: 0 }}>Forward custom email addresses to an inbox you already use. Aliases work right after MX records propagate.</p>
-          <Empty icon="Mail" title="No forwarding addresses"
-            body={`Add aliases like hello@${domainLabel} to forward mail to any inbox.`}
-            action={<button className="btn btn-outline btn-sm"><ICN.Plus size={14} /> Add forwarding address</button>} />
+          <button className="btn btn-outline" onClick={() => navigate({ view: "dns", params: { domain: domainLabel, section: "settings" } })}>
+            <ICN.Settings size={14} /> Open settings
+          </button>
         </div>
       </div>
     </>
   );
 }
 
+const DOMAIN_SETTINGS_TABS = [
+  ['overview', 'Overview'],
+  ['billing', 'Billing'],
+  ['dns', 'Records'],
+  ['addons', 'Add-ons'],
+];
+
+function domainFeature(settings, feature) {
+  return settings?.providerServices?.find((item) => item.feature === feature) || null;
+}
+
+function formatDomainMoney(cents, currency = 'USD') {
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(Number(cents || 0) / 100);
+}
+
+function formatDomainDate(value) {
+  if (!value) return 'Not available';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function SettingRows({ rows = [] }) {
+  return (
+    <div style={{ display: 'grid', gap: 1, background: 'var(--border)', border: '1px solid var(--border)', borderRadius: 'var(--r)', overflow: 'hidden' }}>
+      {rows.map(([label, value]) => (
+        <div key={label} className="row between" style={{ gap: 18, padding: '11px 14px', background: 'var(--bg-elev)' }}>
+          <span className="muted" style={{ fontSize: 13 }}>{label}</span>
+          <strong style={{ fontSize: 13, textAlign: 'right', overflowWrap: 'anywhere' }}>{value ?? 'Not available'}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function capabilityState(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  const available = value !== null && value !== undefined && normalized !== '' && normalized !== 'not available';
+  const offValues = ['false', 'off', 'disabled', 'inactive', '0'];
+  return {
+    available,
+    enabled: available && !offValues.includes(normalized),
+    displayValue: available
+      ? (normalized === 'true' || normalized === 'on' ? 'Enabled' : normalized === 'false' || normalized === 'off' ? 'Disabled' : String(value))
+      : 'Not available',
+  };
+}
+
+function CapabilityRows({ rows = [], onStatusClick }) {
+  return (
+    <div className="domain-capability-list">
+      {rows.map(([id, label, value]) => {
+        const state = capabilityState(value);
+        return (
+          <div className={`domain-capability-row${state.available ? '' : ' unavailable'}`} key={id}>
+            <div className="domain-capability-copy">
+              <span>{label}</span>
+              <strong>{state.displayValue}</strong>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={state.enabled}
+              aria-label={`${label}: ${state.displayValue}`}
+              className={`domain-capability-switch${state.enabled ? ' is-on' : ''}`}
+              data-testid={`domain-capability-${id}`}
+              onClick={() => onStatusClick(label, state)}
+            >
+              <span />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function DomainSettings({ domain = '', navigate }) {
+  const { domains, loading: domainsLoading } = useDomains();
+  const managedDomain = domains.find((item) => item.id === domain || item.name === domain);
+  const [activeTab, setActiveTab] = useStateD('overview');
+  const settingsTabsRef = useRef(null);
+  const settingsTabRefs = useRef({});
+  const [tabIndicator, setTabIndicator] = useStateD({ left: 0, width: 0, ready: false });
+  const [settings, setSettings] = useStateD(null);
+  const [loading, setLoading] = useStateD(true);
+  const [error, setError] = useStateD('');
+  const [addonBusy, setAddonBusy] = useStateD('');
+  const [addonMessage, setAddonMessage] = useStateD('');
+  const [settingsToast, setSettingsToast] = useStateD(null);
+  const settingsToastTimer = useRef(null);
+
+  useEffect(() => () => {
+    if (settingsToastTimer.current) window.clearTimeout(settingsToastTimer.current);
+  }, []);
+
+  const showSettingsToast = (message, tone = 'error') => {
+    if (settingsToastTimer.current) window.clearTimeout(settingsToastTimer.current);
+    setSettingsToast({ id: Date.now(), message, tone });
+    settingsToastTimer.current = window.setTimeout(() => setSettingsToast(null), 3800);
+  };
+
+  const handleCapabilityClick = (label, state) => {
+    if (!state.available) {
+      showSettingsToast(`${label} is not available until this domain is fully connected.`);
+      return;
+    }
+    showSettingsToast(`${label} is synchronized and managed automatically by Glondia.`, 'info');
+  };
+
+  useEffect(() => {
+    if (domainsLoading) return;
+    if (!managedDomain?.id) {
+      setLoading(false);
+      setError('Domain is not assigned to this account.');
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    getCustomerDomainSettings(managedDomain.id)
+      .then((result) => { if (alive) setSettings(result); })
+      .catch((requestError) => { if (alive) setError(requestError.message || 'Could not load domain settings.'); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [domainsLoading, managedDomain?.id]);
+
+  useEffect(() => {
+    const tabs = settingsTabsRef.current;
+    const activeButton = settingsTabRefs.current[activeTab];
+    if (!tabs || !activeButton) return undefined;
+    const updateIndicator = () => {
+      setTabIndicator({
+        left: activeButton.offsetLeft,
+        width: activeButton.offsetWidth,
+        ready: true,
+      });
+    };
+    updateIndicator();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateIndicator) : null;
+    observer?.observe(tabs);
+    observer?.observe(activeButton);
+    window.addEventListener('resize', updateIndicator);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateIndicator);
+    };
+  }, [activeTab]);
+
+  const domainLabel = managedDomain?.name || domain || 'Domain';
+  const zone = domainFeature(settings, 'zone');
+  const zoneSettings = domainFeature(settings, 'zone_settings');
+  const dnssec = domainFeature(settings, 'dnssec');
+  const botManagement = domainFeature(settings, 'bot_management');
+  const healthChecks = domainFeature(settings, 'health_checks');
+  const availablePlans = domainFeature(settings, 'available_plans');
+  const zoneSubscription = domainFeature(settings, 'zone_subscription');
+  const importantSettings = Array.isArray(zoneSettings?.data) ? zoneSettings.data : [];
+  const setting = (id) => importantSettings.find((item) => item.id === id);
+  const checker = settings?.checker || {};
+  const addonFeature = (id) => domainFeature(settings, `addon:${id}`);
+  const addonBilling = (id) => settings?.billing?.addons?.find((item) => item.addonKey === id);
+  const refreshSettings = async () => {
+    if (managedDomain?.id) setSettings(await getCustomerDomainSettings(managedDomain.id));
+  };
+  const requestAddon = async (addonId) => {
+    if (!managedDomain?.id || addonBusy) return;
+    setAddonBusy(addonId);
+    setAddonMessage('');
+    try {
+      const result = await activateCustomerDomainAddon(managedDomain.id, addonId);
+      setAddonMessage(`${result.addon} is ${String(result.status || 'being prepared').replaceAll('_', ' ')}. Nameserver and activation checks are running in the background.`);
+      await refreshSettings();
+      for (const delay of [1800, 5000, 10_000]) {
+        window.setTimeout(() => refreshSettings().catch(() => {}), delay);
+      }
+    } catch (requestError) {
+      setAddonMessage(requestError.message || 'The add-on could not be prepared.');
+    } finally {
+      setAddonBusy('');
+    }
+  };
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <a className="page-eyebrow" href="#" onClick={(event) => { event.preventDefault(); navigate({ view: 'domains-mine' }); }}>← My domains</a>
+          <h1 style={{ marginTop: 8 }}>Domain settings: <span className="mono" style={{ fontSize: 32, color: 'var(--accent)' }}>{domainLabel}</span></h1>
+          <p className="sub">Stored billing, Glondia configuration, security, and health. Synchronization runs securely in the background.</p>
+        </div>
+        <div className="actions">
+          <button className="btn btn-outline" onClick={() => navigate({ view: 'dns', params: { domain: domainLabel, section: 'records' } })}>
+            <ICN.Network size={14} /> Records
+          </button>
+        </div>
+      </div>
+
+      <div className="card domain-settings-tabs-card">
+        <div className="domain-settings-tabs" ref={settingsTabsRef}>
+          <span
+            className="domain-settings-tab-indicator"
+            aria-hidden="true"
+            style={{
+              width: tabIndicator.width,
+              opacity: tabIndicator.ready ? 1 : 0,
+              transform: `translateX(${tabIndicator.left}px)`,
+            }}
+          />
+          {DOMAIN_SETTINGS_TABS.map(([id, label]) => (
+            <button
+              key={id}
+              ref={(node) => { if (node) settingsTabRefs.current[id] = node; }}
+              className={`domain-settings-tab${activeTab === id ? ' active' : ''}`}
+              onClick={() => setActiveTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <div className="card" style={{ padding: 24 }}>Loading saved domain service data…</div>}
+      {error && <div className="card" style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
+
+      {!loading && settings && activeTab === 'overview' && (
+        <div key="overview" className="grid-2 domain-settings-panel">
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Service overview</h2>
+            <SettingRows rows={[
+              ['Provider', settings.domain?.provider],
+              ['Domain status', settings.domain?.status],
+              ['Glondia network', zone?.status || 'Not connected'],
+              ['Zone type', zone?.data?.type],
+              ['Last provider sync', formatDomainDate(zone?.lastSyncedAt)],
+            ]} />
+          </div>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Configuration checks</h2>
+            <SettingRows rows={[
+              ['Zone active', checker.zoneActive ? 'Passed' : 'Needs attention'],
+              ['DNS records present', checker.dnsPresent ? 'Passed' : 'Needs attention'],
+              ['Nameservers assigned', checker.nameserversAssigned ? 'Passed' : 'Needs attention'],
+              ['DNSSEC', checker.dnssecStatus],
+              ['Checked', formatDomainDate(checker.checkedAt)],
+            ]} />
+          </div>
+        </div>
+      )}
+
+      {!loading && settings && activeTab === 'billing' && (
+        <div key="billing" className="grid-2 domain-settings-panel">
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Domain billing</h2>
+            <SettingRows rows={[
+              ['Price', formatDomainMoney(settings.billing?.amountCents, settings.billing?.currency)],
+              ['Add-ons', formatDomainMoney(settings.billing?.addonAmountCents, settings.billing?.currency)],
+              ['Combined recurring total', formatDomainMoney(settings.billing?.combinedRecurringAmountCents, settings.billing?.currency)],
+              ['Billing cycle', settings.billing?.cycle],
+              ['Payment status', settings.billing?.paymentStatus],
+              ['Auto-renew', settings.billing?.autoRenew ? 'Enabled' : 'Disabled'],
+              ['Renews', formatDomainDate(settings.billing?.renewsAt)],
+              ['Expires', formatDomainDate(settings.billing?.expiresAt)],
+            ]} />
+            <h3 style={{ marginTop: 20 }}>Glondia domain services</h3>
+            <SettingRows rows={[
+              ['Current plan', zoneSubscription?.data?.rate_plan?.name || 'Not connected'],
+              ['Glondia service adjustment', `${settings.billing?.addonMarkupPercent ?? 30}%`],
+              ['Client price', zoneSubscription?.data?.rate_plan ? formatDomainMoney(zoneSubscription.data.rate_plan.customerPrice * 100, zoneSubscription.data.rate_plan.currency || 'USD') : 'Not available'],
+              ['Pricing source', zoneSubscription?.data?.pricingSource === 'glondia_api' ? 'Glondia API' : 'Not synchronized'],
+            ]} />
+            <h3 style={{ marginTop: 20 }}>Add-on billing</h3>
+            {settings.billing?.addons?.length ? (
+              <SettingRows rows={settings.billing.addons.map((addon) => [
+                addon.name,
+                `${formatDomainMoney(addon.totalAmountCents, addon.currency)} / ${addon.billingCycle} · ${addon.paymentStatus} · ${addon.invoiceId ? 'invoiced' : addon.billingStatus}`,
+              ])} />
+            ) : <p className="muted">No add-on charges are attached to this domain.</p>}
+          </div>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Glondia plans and add-ons</h2>
+            {Array.isArray(availablePlans?.data) && availablePlans.data.length ? (
+              <SettingRows rows={availablePlans.data.map((plan) => [
+                plan.name || plan.id,
+                `${formatDomainMoney(plan.customerPrice * 100, plan.currency || 'USD')} / ${plan.frequency || 'month'} · includes ${plan.markupPercent}% markup`,
+              ])} />
+            ) : <p className="muted">{availablePlans?.error || 'No Glondia plan catalog has been synchronized for this domain.'}</p>}
+            <h3 style={{ marginTop: 20 }}>Billing records</h3>
+            {settings.billing?.ledger?.length ? (
+              <SettingRows rows={settings.billing.ledger.slice(0, 8).map((item) => [
+                item.classification || item.billingType,
+                `${formatDomainMoney(item.totalAmountCents ?? item.amountCents, item.currency || settings.billing.currency)} · ${item.stage}`,
+              ])} />
+            ) : <p className="muted">No item-level billing ledger records have been recorded for this domain.</p>}
+          </div>
+        </div>
+      )}
+
+      {!loading && settings && activeTab === 'dns' && (
+        <div key="dns" className="grid-2 domain-settings-panel">
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>DNS record snapshot</h2>
+            <SettingRows rows={[
+              ['Total records', settings.records?.total],
+              ['Proxied records', settings.records?.proxied],
+              ['Record types', Object.entries(settings.records?.byType || {}).map(([type, count]) => `${type} ${count}`).join(' · ') || 'None'],
+              ['Last synchronized', formatDomainDate(settings.records?.lastSyncedAt)],
+            ]} />
+            <button className="btn btn-outline" style={{ marginTop: 14 }} onClick={() => navigate({ view: 'dns', params: { domain: domainLabel, section: 'records' } })}>
+              <ICN.Network size={14} /> Manage records
+            </button>
+          </div>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Nameservers</h2>
+            {settings.nameservers?.length ? settings.nameservers.map((nameserver) => (
+              <div key={nameserver} className="row between" style={{ padding: '10px 12px', marginBottom: 7, background: 'var(--bg-deep)', borderRadius: 'var(--r-sm)' }}>
+                <span className="mono">{nameserver}</span>
+                <button className="btn btn-sm btn-ghost" onClick={() => navigator.clipboard?.writeText(nameserver)}><ICN.Copy size={14} /></button>
+              </div>
+            )) : <p className="muted">No provider nameserver data has been synchronized.</p>}
+          </div>
+        </div>
+      )}
+
+      {!loading && settings && activeTab === 'addons' && (
+        <div key="security" className="grid-2 domain-settings-panel" style={{ marginBottom: 18 }}>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>TLS and visitor security</h2>
+            <CapabilityRows onStatusClick={handleCapabilityClick} rows={[
+              ['ssl', 'SSL mode', setting('ssl')?.value],
+              ['always-use-https', 'Always use HTTPS', setting('always_use_https')?.value],
+              ['minimum-tls', 'Minimum TLS', setting('min_tls_version')?.value],
+              ['security-level', 'Security level', setting('security_level')?.value],
+              ['browser-integrity', 'Browser integrity check', setting('browser_check')?.value],
+              ['challenge-ttl', 'Challenge TTL', setting('challenge_ttl')?.value],
+            ]} />
+          </div>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>DNSSEC and delivery</h2>
+            <CapabilityRows onStatusClick={handleCapabilityClick} rows={[
+              ['dnssec', 'DNSSEC status', dnssec?.data?.status || dnssec?.status],
+              ['dnssec-algorithm', 'Algorithm', dnssec?.data?.algorithm],
+              ['dnssec-digest', 'Digest algorithm', dnssec?.data?.digest_algorithm],
+              ['ipv6', 'IPv6', setting('ipv6')?.value],
+              ['websockets', 'WebSockets', setting('websockets')?.value],
+              ['hotlink-protection', 'Hotlink protection', setting('hotlink_protection')?.value],
+            ]} />
+          </div>
+        </div>
+      )}
+
+      {!loading && settings && activeTab === 'addons' && (
+        <div key="bots" className="card domain-settings-panel" style={{ marginBottom: 18 }}>
+          <h2 style={{ marginTop: 0 }}>Protection services</h2>
+          <p className="muted">Turn on a service to begin. Included services activate directly; charged services open Glondia checkout before provisioning.</p>
+          <div className="domain-addon-service-grid">
+            {[
+              { id: 'bot_control', name: 'Bot control', description: 'Challenges known automated traffic across the domain.' },
+              { id: 'anti_scraping', name: 'Anti-scraping', description: 'Blocks baseline AI and content-scraping bots.' },
+            ].map((service) => {
+              const feature = addonFeature(service.id);
+              const billing = addonBilling(service.id);
+              const status = billing?.status || feature?.data?.status || 'inactive';
+              const active = ['active', 'provisioning', 'queued', 'pending_activation', 'activating'].includes(status);
+              const charged = Number(billing?.totalAmountCents || 0) > 0;
+              const needsPayment = charged && billing?.paymentStatus !== 'paid';
+              return (
+                <div className={`domain-addon-service${active ? ' active' : ''}`} key={service.id}>
+                  <div className="row between" style={{ alignItems: 'flex-start', gap: 14 }}>
+                    <div>
+                      <h3>{service.name}</h3>
+                      <p>{service.description}</p>
+                    </div>
+                    <button type="button" role="switch" aria-checked={active}
+                      className={`domain-addon-switch${active ? ' on' : ''}`}
+                      disabled={Boolean(addonBusy) || active || needsPayment}
+                      onClick={() => requestAddon(service.id)}>
+                      <span />
+                    </button>
+                  </div>
+                  <div className="domain-addon-service-meta">
+                    <Badge tone={status === 'active' ? 'success' : status === 'inactive' ? 'muted' : 'warning'}>
+                      {String(status).replaceAll('_', ' ')}
+                    </Badge>
+                    <strong>{charged ? `${formatDomainMoney(billing.totalAmountCents, billing.currency)} / ${billing.billingCycle}` : 'Included · $0.00'}</strong>
+                  </div>
+                  {needsPayment && (
+                    <div className="domain-addon-checkout">
+                      <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>Payment is required before this service can start.</div>
+                      <PayPalCheckoutButton disabled={false}
+                        createOrder={() => createDomainAddonPayPalOrder(billing.id)}
+                        captureOrder={captureDomainAddonPayPalOrder}
+                        onPaid={async () => {
+                          setAddonMessage(`${service.name} payment confirmed. Activation has started.`);
+                          await refreshSettings();
+                        }}
+                        onError={setAddonMessage} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {addonMessage && <div className="card anim-fadeIn" style={{ padding: 12, margin: '16px 0' }}>{addonMessage}</div>}
+          {botManagement?.status === 'synced' ? (
+            <SettingRows rows={[
+              ['Bot Fight Mode', botManagement.data?.fight_mode ? 'Enabled' : 'Disabled'],
+              ['AI bot protection', botManagement.data?.ai_bots_protection],
+              ['Content bot protection', botManagement.data?.content_bots_protection],
+              ['Crawler protection', botManagement.data?.crawler_protection],
+              ['Managed robots.txt', botManagement.data?.is_robots_txt_managed ? 'Enabled' : 'Disabled'],
+              ['JavaScript detection', botManagement.data?.enable_js ? 'Enabled' : 'Disabled'],
+            ]} />
+          ) : <p className="muted">{botManagement?.error || 'Bot Management has not been synchronized for this zone.'}</p>}
+        </div>
+      )}
+
+      {!loading && settings && activeTab === 'addons' && (
+        <div key="health" className="grid-2 domain-settings-panel">
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Domain checker</h2>
+            <SettingRows rows={[
+              ['Glondia protection connected', checker.cloudflareConnected ? 'Passed' : 'Not connected'],
+              ['Zone status', checker.zoneActive ? 'Active' : 'Needs attention'],
+              ['DNS', checker.dnsPresent ? `${settings.records.total} records` : 'No records'],
+              ['Nameservers', checker.nameserversAssigned ? `${settings.nameservers.length} assigned` : 'Not synchronized'],
+              ['DNSSEC', checker.dnssecStatus],
+            ]} />
+          </div>
+          <div className="card">
+            <h2 style={{ marginTop: 0 }}>Glondia health checks</h2>
+            {Array.isArray(healthChecks?.data) && healthChecks.data.length ? (
+              <SettingRows rows={healthChecks.data.map((check) => [check.name || check.id, `${check.status || 'unknown'} · ${check.type || 'HTTP'} ${check.address || ''}`])} />
+            ) : <p className="muted">{healthChecks?.error || 'No Glondia health checks are configured for this zone.'}</p>}
+          </div>
+        </div>
+      )}
+
+      {settingsToast && (
+        <div
+          key={settingsToast.id}
+          className={`domain-settings-toast ${settingsToast.tone}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span className="domain-settings-toast-mark" aria-hidden="true">
+            {settingsToast.tone === 'error' ? '!' : 'i'}
+          </span>
+          <span>{settingsToast.message}</span>
+        </div>
+      )}
+
+    </>
+  );
+}
+
 function DnsStatusBadge({ status }) {
-  if (!status || status === 'active') return <Badge tone="success" dot={false}>Active</Badge>;
-  if (status === 'pending') return <Badge tone="muted" dot={false}>Pending</Badge>;
-  if (status === 'failed') return <Badge tone="danger" dot={false}>Failed</Badge>;
-  return <Badge tone="muted" dot={false}>{status}</Badge>;
+  const normalized = String(status || 'active').toLowerCase();
+  const label = normalized === 'active'
+    ? 'Active'
+    : normalized === 'pending'
+      ? 'Pending'
+      : normalized === 'failed'
+        ? 'Failed'
+        : status;
+  return (
+    <span className={`dns-status dns-status-${normalized.replace(/[^a-z0-9-]/g, '-')}`}>
+      <span aria-hidden="true" />
+      {label}
+    </span>
+  );
 }
 
 function ImportZonePanel({ domainId, canMutate, onClose, onDone }) {

@@ -1,0 +1,16 @@
+﻿{
+  "assignments": [
+    {
+      "clientId": "glondiac-4108",
+      "provider": "spaceship",
+      "name": "example.com",
+      "providerResourceId": "example.com"
+    },
+    {
+      "clientId": "glondiac-4108",
+      "provider": "cloudflare",
+      "name": "example.com",
+      "providerResourceId": "0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

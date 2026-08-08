@@ -82,11 +82,11 @@ async function main() {
 
     const { registerUser } = await import('../server/src/services/authService.js');
     const { createDeploymentRecord } = await import('../server/src/glondia-engines/00-SHARED/deploymentRecordStore.js');
-    const { createDeploymentOrder, getOrderForDeployment } = await import('../server/src/services/deploymentBillingService.js');
+    const { createDeploymentOrder } = await import('../server/src/services/deploymentBillingService.js');
     const { prisma } = await import('../server/src/services/db.js');
 
     const session = await registerUser({ email: 'smoke@test.local', password: 'password123', name: 'Smoke Test' });
-    ok(`Registered user (promoEligible expected true): rank=${session.user?.promoSignupRank ?? '?'}`);
+    ok(`Registered user: ${session.user.id}`);
 
     const deployment = await createDeploymentRecord({
       userId: session.user.id, serviceName: 'smoke-site', source: 'zip-upload',
@@ -94,19 +94,13 @@ async function main() {
     });
     ok(`Created deployment record: ${deployment.deploymentId}`);
 
-    // Standard tier order
-    const std = await createDeploymentOrder({ deployment, user: { id: session.user.id }, kind: 'zip', billingTierId: 'standard_200' });
-    const stdOrder = await getOrderForDeployment(deployment.deploymentId);
-    stdOrder ? ok(`CheckoutOrder created: ${stdOrder.id} status=${stdOrder.status} amount=${std.displayAmount} tier=${std.billingTierId}`)
-             : (bad('No CheckoutOrder row created — billing would NOT update'), failures++);
-
-    // Promo tier order on a fresh deployment
-    const dep2 = await createDeploymentRecord({ userId: session.user.id, serviceName: 'smoke-site-2', source: 'github-import', status: 'building' });
-    const promo = await createDeploymentOrder({ deployment: dep2, user: { id: session.user.id }, kind: 'github', billingTierId: 'promo_50' });
-    ok(`Promo order: tier=${promo.billingTierId} amount=${promo.displayAmount} promoApplied=${promo.promoApplied} switched=${promo.switched}`);
+    // No checkout exists until recorded usage has been issued on an invoice.
+    const std = await createDeploymentOrder({ deployment, user: { id: session.user.id }, kind: 'zip' });
 
     const orderCount = await prisma.checkoutOrder.count({ where: { type: 'deployment' } });
-    orderCount >= 2 ? ok(`Total deployment CheckoutOrders in DB: ${orderCount}`) : (bad(`Expected >=2 orders, got ${orderCount}`), failures++);
+    orderCount === 0 && std.status === 'metering'
+      ? ok('No checkout order created before an invoice exists')
+      : (bad(`Expected metering with 0 orders, got ${std.status} and ${orderCount}`), failures++);
 
     await prisma.$disconnect();
   } catch (err) {

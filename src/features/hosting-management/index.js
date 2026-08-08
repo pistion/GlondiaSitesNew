@@ -7,7 +7,7 @@ export { default as HostingSettingsSection } from './HostingSettingsSection.jsx'
 export { default as EnvVarsSection } from './EnvVarsSection.jsx';
 export { default as SecretFilesSection } from './SecretFilesSection.jsx';
 export { default as HeadersSection } from './HeadersSection.jsx';
-export { default as RulesSection } from './RulesSection.jsx';
+export { default as WebhooksSection } from './WebhooksSection.jsx';
 export { default as DisksSection } from './DisksSection.jsx';
 export { default as DomainsSection } from './DomainsSection.jsx';
 export { default as BillingSection } from './BillingSection.jsx';

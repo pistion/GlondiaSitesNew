@@ -1,5 +1,5 @@
 /**
- * billingAttach.middleware.js - attach billing after Render handoff only.
+ * billingAttach.middleware.js - attach service billing after any provider handoff.
  *
  * No Render service means no billing and no trial timer.
  */
@@ -10,9 +10,9 @@ import { appendDeployStep, appendDeployWarning } from './deployFlowState.middlew
 
 const BILLABLE_STATUSES = new Set(['building', 'queued', 'deployed', 'live', 'deployed_unverified']);
 
-function isQueuedInRender(d) {
-  if (!d || !d.deploymentId || !d.renderServiceId) return false;
-  if (!d.renderDeployId && d.buildStatus !== 'queued') return false;
+function isProviderDeployed(d) {
+  if (!d || !d.deploymentId || d.platformDeployed !== true) return false;
+  if (!d.providerServiceId && !d.renderServiceId) return false;
   return BILLABLE_STATUSES.has(d.status);
 }
 
@@ -25,12 +25,12 @@ export function attachDeploymentBilling(kind) {
       || d.status === 'failed'
       || d.status === 'ready'
       || d.buildStatus === 'configuration_required'
-      || !isQueuedInRender(d)
+      || !isProviderDeployed(d)
     ) {
       const skipped = {
         skipped: true,
         reason: 'deployment_not_queued',
-        message: 'Billing will start after the deployment is queued in Render.',
+        message: 'Billing will start after the hosting provider accepts the deployment.',
       };
       req.deployFlow.billing = skipped;
       req.deployFlow.skippedBilling = skipped;
@@ -39,10 +39,9 @@ export function attachDeploymentBilling(kind) {
       return next();
     }
 
-    const billingTierId = req.body?.billingTierId || req.body?.tierId || null;
     req.deployFlow.billing = {
       status: 'billing_pending',
-      message: 'Your site is launching on free hosting. Billing will be prepared in the background for the 12-hour trial window.',
+      message: 'Usage billing is being registered in the background.',
     };
     appendDeployStep(req, { name: 'billing_attach', status: 'queued', message: 'background' });
 
@@ -50,18 +49,17 @@ export function attachDeploymentBilling(kind) {
       deployment: d,
       user: req.user || {},
       kind,
-      billingTierId,
     });
     next();
   };
 }
 
-function queueBillingAttach({ deployment, user, kind, billingTierId }) {
+function queueBillingAttach({ deployment, user, kind }) {
   setImmediate(async () => {
     try {
-      await addDeploymentLog(deployment.deploymentId, 'Billing attach queued after free-tier Render handoff.', 'info');
-      const summary = await createDeploymentOrder({ deployment, user, kind, billingTierId });
-      await addDeploymentLog(deployment.deploymentId, `Billing attached (${summary?.billingTierId || 'tier'}).`, 'ok');
+      await addDeploymentLog(deployment.deploymentId, 'Usage billing registration queued after provider handoff.', 'info');
+      const summary = await createDeploymentOrder({ deployment, user, kind });
+      await addDeploymentLog(deployment.deploymentId, `Billing status: ${summary?.status || 'metering'}.`, 'ok');
     } catch (error) {
       console.error('[billing] background attach failed:', error.message);
       await recordBackgroundBillingFailure({ deployment, user, kind, error });

@@ -1,4 +1,4 @@
-// BuilderImport.jsx - GitHub repository import + ZIP drag/drop Hosting handoff flow.
+// BuilderImport.jsx - GitHub repository import + ZIP drag/drop Glondia Hosting launch flow.
 import React, { useState as useStateB } from 'react';
 import { ICN } from '../../../icons';
 import { parseGithubRepo } from '../../../api';
@@ -8,7 +8,6 @@ import {
   getHostingDeploySettings,
   validateZipHostingDeployment,
 } from '../../../api/hosting-deploy.js';
-import { getDeploymentPricing } from '../../../api/payments.js';
 import { GithubPreparePanel } from '../prepare/GithubPreparePanel.jsx';
 import { HandoffReadinessCard, getHandoffReadinessChecks } from '../prepare/HandoffReadinessCard.jsx';
 import { HandoffSummaryCard } from '../prepare/HandoffSummaryCard.jsx';
@@ -17,7 +16,7 @@ import { DEPLOY_PRESETS } from '../prepare/deployPresets.js';
 
 // ── Presets ────────────────────────────────────────────────────────────────────
 
-// ── Handoff Doctor ─────────────────────────────────────────────────────────────
+// ── Launch Checks ─────────────────────────────────────────────────────────────
 
 function getDeployDoctorChecks(config = {}, context = {}) {
   const checks = [];
@@ -29,7 +28,7 @@ function getDeployDoctorChecks(config = {}, context = {}) {
   const publishDirectory = config.publishDirectory || config.outputDirectory || '';
   const startCommand = config.startCommand || '';
 
-  checks.push({ status: sourceRepository ? 'ok' : (context.sourceOptional ? 'warn' : 'error'), label: sourceRepository ? 'Source repository set' : (context.sourceOptional ? 'Source repository not set; server default will be used' : 'Source repository is required'), fix: null });
+  checks.push({ status: sourceRepository ? 'ok' : (context.sourceOptional ? 'ok' : 'error'), label: sourceRepository ? 'Source connected' : (context.sourceOptional ? 'Source package ready' : 'Connect a source first'), fix: null });
   checks.push({ status: branch ? 'ok' : 'error', label: branch ? `Branch set to ${branch}` : 'Branch is required', fix: null });
 
   if (rootDirectory.includes('/opt/render/project')) {
@@ -37,7 +36,7 @@ function getDeployDoctorChecks(config = {}, context = {}) {
   } else if (context.recommendedRoot && rootDirectory !== context.recommendedRoot) {
     checks.push({ status: 'warn', label: `Recommended root is ${context.recommendedRoot}`, fix: { label: `Use ${context.recommendedRoot}`, patch: { rootDirectory: context.recommendedRoot } } });
   } else {
-    checks.push({ status: rootDirectory ? 'ok' : 'warn', label: rootDirectory ? `Root directory set to ${rootDirectory}` : 'Root directory not set; repo root will be used', fix: null });
+    checks.push({ status: rootDirectory ? 'ok' : 'warn', label: rootDirectory ? `Project folder set to ${rootDirectory}` : 'Project folder not set; root will be used', fix: null });
   }
 
   if (serviceType === 'static_site') {
@@ -74,7 +73,7 @@ function DeployDoctorCard({ config, context, onApplyFix }) {
   return (
     <div className="card" style={{ padding: 14, background: 'var(--bg-deep)' }}>
       <div className="row between">
-        <div><div className="eyebrow">Handoff Doctor</div><h3 style={{ margin: '4px 0 0' }}>Handoff readiness</h3></div>
+        <div><div className="eyebrow">Launch Check</div><h3 style={{ margin: '4px 0 0' }}>Launch readiness</h3></div>
         <div className="row" style={{ gap: 8 }}>
           <Badge tone={errors ? 'danger' : warnings ? 'warn' : 'success'} dot={false}>{errors ? `${errors} issue${errors > 1 ? 's' : ''}` : warnings ? `${warnings} warning${warnings > 1 ? 's' : ''}` : 'Ready'}</Badge>
           <Badge tone={score >= 100 ? 'success' : score >= 70 ? 'warn' : 'danger'} dot={false}>{score}%</Badge>
@@ -101,20 +100,18 @@ function DeploymentPreviewCard({ config }) {
   const isStatic = (config.serviceType || 'static_site') === 'static_site';
   return (
     <div className="card" style={{ padding: 14, background: 'var(--bg-deep)' }}>
-      <div className="eyebrow">Suggested hosting handoff</div>
-      <h3 style={{ margin: '4px 0 10px' }}>Suggested settings for Hosting</h3>
+      <div className="eyebrow">Glondia launch settings</div>
+      <h3 style={{ margin: '4px 0 10px' }}>Suggested settings</h3>
       <div className="kv" style={{ gridTemplateColumns: '120px 1fr' }}>
         <dt>Service name</dt><dd className="mono">{config.serviceName || 'auto'}</dd>
         <dt>Type</dt><dd>{config.serviceType || 'static_site'}</dd>
-        <dt>Repo</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{config.sourceRepository || config.repoUrl || '(server default)'}</dd>
+        <dt>Source</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{config.sourceRepository || config.repoUrl || 'Uploaded package'}</dd>
         <dt>Branch</dt><dd className="mono">{config.branch || 'main'}</dd>
-        <dt>Root</dt><dd className="mono">{config.rootDirectory || 'repo root'}</dd>
+        <dt>Folder</dt><dd className="mono">{config.rootDirectory || 'project root'}</dd>
         <dt>Build</dt><dd className="mono">{config.buildCommand || 'Not set'}</dd>
         {isStatic
           ? <><dt>Publish</dt><dd className="mono">{config.publishDirectory || config.outputDirectory || 'Not set'}</dd></>
           : <><dt>Start</dt><dd className="mono">{config.startCommand || 'Not set'}</dd></>}
-        <dt>Plan</dt><dd className="mono">{config.plan || 'starter'}</dd>
-        <dt>Region</dt><dd className="mono">{config.region || 'oregon'}</dd>
       </div>
     </div>
   );
@@ -129,7 +126,7 @@ const DEPLOY_MODE_OPTIONS = [
   { value: 'custom_commands', label: 'Custom commands' },
 ];
 
-function ZipDetectionPreview({ validation, validating, deployMode, onDeployModeChange, graceHours = 12 }) {
+function ZipDetectionPreview({ validation, validating, deployMode, onDeployModeChange }) {
   if (validating) {
     return <div className="card" style={{ marginTop: 12, padding: 12, background: 'var(--bg-deep)', fontSize: 13 }}>Analyzing your ZIP…</div>;
   }
@@ -175,9 +172,6 @@ function ZipDetectionPreview({ validation, validating, deployMode, onDeployModeC
         </select>
       </div>
 
-      <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-        Your site starts on the free hosting plan for {graceHours} hours. After payment is verified, Glondia upgrades your hosting plan and redeploys.
-      </div>
     </div>
   );
 }
@@ -191,15 +185,15 @@ function formatFileSize(bytes = 0) {
 }
 
 function ImportProgressPreview({ phase, repo, branch, error, showLoader, isImporting, zipFile }) {
-  const title = zipFile?.name || repo?.fullName || 'Your project';
+  const title = zipFile?.name || repo?.fullName || 'Launch source';
   const activeLabel = {
     idle: 'Choose GitHub import or drag a ZIP file on the left.',
     checking: 'Checking repository format...',
     detected: 'Repository detected. Click Import to pull files.',
-    zip_ready: 'ZIP selected. Click Send ZIP to Hosting to create a handoff.',
+    zip_ready: 'ZIP selected. Send it to Glondia Hosting when you are ready.',
     pulling: 'Pulling files from GitHub...',
     uploading: 'Sending to Hosting...',
-    building: 'Preparing handoff...',
+    building: 'Preparing launch...',
     complete: 'Import complete. Opening next screen...',
     error: 'Import needs attention.',
   }[phase] || 'Ready when you are.';
@@ -209,14 +203,14 @@ function ImportProgressPreview({ phase, repo, branch, error, showLoader, isImpor
     <div className={`bld-preview-frame import-loader-frame ${!isImporting ? 'import-loader-frame--still' : ''}`}>
       <div className="import-loader-shell">
         <div className="import-loader-copy">
-          <div className="eyebrow">Preparation pipeline</div>
+          <div className="eyebrow">Glondia Launch</div>
           <h2>{title}</h2>
           <div className="muted" style={{ fontSize: 13 }}>
             {zipFile
               ? <span className="mono">{formatFileSize(zipFile.size)} ZIP selected</span>
               : repo
               ? <span className="mono">{repo.owner}/{repo.repo} · {branch}</span>
-              : <span>Add a GitHub repo or ZIP file to begin.</span>}
+              : <span>Choose a ZIP file or repository.</span>}
           </div>
         </div>
 
@@ -228,7 +222,7 @@ function ImportProgressPreview({ phase, repo, branch, error, showLoader, isImpor
         ) : (
           <div className="import-loader-standby">
             {zipFile ? <ICN.Box size={18} /> : <ICN.Git size={18} />}
-            <span>{zipFile ? 'ZIP ready for handoff' : repo ? 'Repository detected' : 'Waiting for project'}</span>
+            <span>{zipFile ? 'ZIP ready for launch' : repo ? 'Repository detected' : 'Ready for source'}</span>
           </div>
         )}
 
@@ -238,7 +232,7 @@ function ImportProgressPreview({ phase, repo, branch, error, showLoader, isImpor
             <div><span className="ts">now</span> <span className={error ? 'err' : 'info'}>{error || activeLabel}</span></div>
             {repo && <div><span className="ts">repo</span> <span className="dim">{repo.owner}/{repo.repo}</span></div>}
             {zipFile && <div><span className="ts">zip</span> <span className="ok">{zipFile.name} ({formatFileSize(zipFile.size)})</span></div>}
-            {(isImporting || phase === 'complete') && <div><span className="ts">next</span> <span className="ok">Hosting detail opens after handoff is created</span></div>}
+            {(isImporting || phase === 'complete') && <div><span className="ts">next</span> <span className="ok">Hosting detail opens after launch is created</span></div>}
           </div>
         )}
       </div>
@@ -248,81 +242,42 @@ function ImportProgressPreview({ phase, repo, branch, error, showLoader, isImpor
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-/**
- * Launch pricing selector: K50 promo (first 20 launch customers) vs K200
- * standard. The promo option disables itself once slots are gone.
- */
-function PricingTierSelector({ pricing, value, onChange }) {
-  const tiers = pricing?.tiers || [
-    { id: 'promo_50', label: 'Launch promo (first 20)', displayAmount: 'K50', promo: true, available: false, renderPlanAfterPayment: 'starter' },
-    { id: 'standard_200', label: 'Standard hosting', displayAmount: 'K200', promo: false, available: true, renderPlanAfterPayment: 'standard' },
+function LaunchLogPanel({ phase, repo, branch, error, zipFile, validation, validating }) {
+  const sourceLabel = zipFile ? zipFile.name : repo ? `${repo.owner}/${repo.repo}` : null;
+  const running = ['uploading', 'building'].includes(phase);
+  const lines = [
+    { ts: 'source', tone: sourceLabel ? 'ok' : 'dim', text: sourceLabel ? `${sourceLabel}${zipFile ? ` (${formatFileSize(zipFile.size)})` : ` @ ${branch}`}` : 'waiting for ZIP or repository' },
+    { ts: 'scan', tone: validating ? 'info' : validation ? 'ok' : sourceLabel ? 'dim' : 'dim', text: validating ? 'reading package and site files...' : validation ? `${validation.framework || 'Static site'} detected` : sourceLabel ? 'ready to inspect on launch' : 'queued' },
+    { ts: 'extract', tone: ['uploading', 'building', 'complete'].includes(phase) ? 'ok' : 'dim', text: ['uploading', 'building', 'complete'].includes(phase) ? 'source extracted into a clean workspace' : 'will unpack source safely' },
+    { ts: 'install', tone: phase === 'building' ? 'info' : phase === 'complete' ? 'ok' : 'dim', text: phase === 'building' ? 'running install and build commands...' : phase === 'complete' ? 'dependencies and build completed' : 'npm install runs only if needed' },
+    { ts: 'publish', tone: phase === 'complete' ? 'ok' : running ? 'info' : 'dim', text: phase === 'complete' ? 'site published on Glondia Hosting' : running ? 'preparing public hosting folder...' : 'waiting for launch' },
   ];
-  const promoRemaining = pricing?.promo?.remaining;
-  const graceHours = pricing?.graceHours || 12;
-
-  // If the selected promo tier is no longer available, fall back to standard.
-  React.useEffect(() => {
-    const selected = tiers.find((t) => t.id === value);
-    if (selected && selected.promo && selected.available === false) onChange('standard_200');
-  }, [pricing]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (error) lines.push({ ts: 'error', tone: 'err', text: error });
 
   return (
-    <div className="card" style={{ padding: 16, marginBottom: 14 }}>
-      <div className="row between" style={{ alignItems: 'center', marginBottom: 10 }}>
-        <div className="eyebrow">Launch hosting price</div>
-        {typeof promoRemaining === 'number' && (
-          <span className="muted" style={{ fontSize: 12 }}>{promoRemaining} promo slot{promoRemaining === 1 ? '' : 's'} left</span>
-        )}
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
-        {tiers.map((t) => {
-          const disabled = t.promo && t.available === false;
-          const active = value === t.id;
-          return (
-            <button
-              key={t.id}
-              type="button"
-              disabled={disabled}
-              onClick={() => onChange(t.id)}
-              style={{
-                textAlign: 'left', padding: '12px 14px', borderRadius: 'var(--r-md)', cursor: disabled ? 'not-allowed' : 'pointer',
-                border: `2px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                background: 'var(--bg-deep)',
-                color: 'var(--text)',
-                opacity: disabled ? 0.5 : 1,
-                transform: active ? 'translateY(-1px)' : 'none',
-                boxShadow: active ? 'inset 0 0 0 1px var(--border)' : 'none',
-                transition: 'border-color .18s ease, transform .18s ease, background .18s ease',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 999,
-                  border: '2px solid var(--accent)',
-                  boxShadow: 'inset 0 0 0 3px var(--bg-deep)',
-                  background: active ? 'var(--accent)' : 'transparent',
-                  flex: '0 0 14px',
-                }} />
-                <div style={{ fontWeight: 700, fontSize: 16 }}>{t.displayAmount} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t.label}</span></div>
-              </div>
-              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>Upgrades to the <b>{t.renderPlanAfterPayment}</b> Glondia hosting plan after payment{disabled ? ' · sold out' : ''}</div>
-            </button>
-          );
-        })}
-      </div>
-      {pricing?.userPromo && !pricing.userPromo.canClaim && (
-        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{pricing.userPromo.message}</div>
-      )}
-      <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-        Your site starts on free hosting for {graceHours} hours. After payment is verified, we upgrade your hosting plan and redeploy.
+    <div className="bld-preview-frame import-loader-frame import-log-frame">
+      <div className="import-loader-shell">
+        <div className="row between" style={{ alignItems: 'flex-start', gap: 12 }}>
+          <div>
+            <div className="eyebrow">Launch Console</div>
+            <h2 style={{ marginBottom: 4 }}>Build log</h2>
+          </div>
+          <span className={`badge ${error ? 'danger' : phase === 'complete' ? 'success' : running ? 'warn' : ''}`}>
+            {error ? 'Stopped' : phase === 'complete' ? 'Live' : running ? 'Running' : 'Ready'}
+          </span>
+        </div>
+        <div className="term import-loader-term import-launch-term" aria-live="polite">
+          {lines.map((line) => (
+            <div key={line.ts}><span className="ts">{line.ts}</span> <span className={line.tone}>{line.text}</span></div>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-export function BuilderImport({ mode = 'github', navigate }) {
+export function BuilderImport({ mode = 'github', hostingTarget: initialHostingTarget = 'shared', dedicatedPlan = null, initialProjectId = '', navigate }) {
+  const [hostingTarget] = React.useState(initialHostingTarget === 'vultr' ? 'vultr' : 'shared');
   const [activeMode, setActiveMode] = useStateB(mode === 'zip' ? 'zip' : 'github');
   const [handoffDraft, setHandoffDraft] = useStateB({
     siteName: '',
@@ -364,9 +319,6 @@ export function BuilderImport({ mode = 'github', navigate }) {
   const [settingsMode, setSettingsMode] = useStateB('basic');
   const [activePreset, setActivePreset] = useStateB(null);
   const [presetNotice, setPresetNotice] = useStateB('');
-  // Launch pricing tier selection (K50 promo while slots remain, else K200).
-  const [pricing, setPricing] = useStateB(null);
-  const [billingTierId, setBillingTierId] = useStateB('standard_200');
   const phaseTimer = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const detectedRepo = parseGithubRepo(repoUrl);
@@ -391,7 +343,7 @@ export function BuilderImport({ mode = 'github', navigate }) {
   }), [renderConfig, activeMode, repoUrl, repoBranch, zipFile, detectedRepo, isStaticSite]);
 
   const doctorContext = React.useMemo(() => ({
-    sourceOptional: activeMode === 'zip' && (zipConfig?.renderSourceRepoConfigured || false),
+    sourceOptional: activeMode === 'zip' || zipConfig?.glondiaHostingConfigured || zipConfig?.renderSourceRepoConfigured || false,
     recommendedBuildCommand: isStaticSite ? 'bash glondia-render-build.sh' : 'npm install && npm run build',
     recommendedPublishDirectory: 'dist',
     recommendedStartCommand: 'npm start',
@@ -441,8 +393,6 @@ export function BuilderImport({ mode = 'github', navigate }) {
 
   React.useEffect(() => () => clearTimeout(phaseTimer.current), []);
   React.useEffect(() => setActiveMode(mode === 'zip' ? 'zip' : 'github'), [mode]);
-  // Load launch pricing once so the tier selector knows promo availability.
-  React.useEffect(() => { getDeploymentPricing().then(setPricing).catch(() => {}); }, []);
   React.useEffect(() => { if (activeMode !== 'zip') return; getHostingDeploySettings().then((cfg) => setZipConfig(cfg)).catch(() => {}); }, [activeMode]);
   React.useEffect(() => {
     const isStatic = renderConfig.serviceType === 'static_site';
@@ -470,7 +420,7 @@ export function BuilderImport({ mode = 'github', navigate }) {
     setZipError(null);
     if (!/\.zip$/i.test(file.name)) { setZipError('Please upload a .zip file.'); setImportPhase('error'); return; }
     setZipFile(file);
-    setZipNotice(`${file.name} selected successfully. Click Send ZIP to Hosting to create a handoff.`);
+    setZipNotice(`${file.name} selected successfully. Send it to Glondia Hosting when you are ready.`);
     setImportPhase('zip_ready');
     // Fire-and-forget detection preview so users see what we found before deploy.
     setZipValidating(true);
@@ -492,6 +442,8 @@ export function BuilderImport({ mode = 'github', navigate }) {
       const outputDirectory = isStaticSite ? renderConfig.frontendPublishDirectory : '';
       const effectiveName = renderConfig.serviceName.trim() || (detectedRepo ? detectedRepo.repo : 'glondia-site');
       const result = await createGithubHostingDeployment({
+        projectId: initialProjectId || undefined,
+        clientProjectId: initialProjectId || undefined,
         ...handoffDraft,
         siteName: effectiveName,
         slug: effectiveName,
@@ -510,7 +462,10 @@ export function BuilderImport({ mode = 'github', navigate }) {
         runtime: isStaticSite ? '' : renderConfig.runtime,
         source: 'github-link',
         sourceReference: repoUrl,
-        billingTierId,
+        hostingTarget,
+        dedicatedPlanId: dedicatedPlan?.id || '',
+        dedicatedPlanRegion: dedicatedPlan?.region || '',
+        dedicatedTier: dedicatedPlan?.tierKey || '',
       });
       clearTimeout(phaseTimer.current); setImportPhase('complete'); window.setTimeout(() => navigate({ view: 'hosting-detail', params: { id: result.deploymentId || result.id } }), 700);
     } catch (err) { setGitError(err.message || 'Failed to connect repository.'); setImportPhase('error'); } finally { setGitBusy(false); }
@@ -518,14 +473,20 @@ export function BuilderImport({ mode = 'github', navigate }) {
 
   const handleZipDeploy = async () => {
     if (!zipFile) { setZipError('Choose or drop a ZIP file first.'); return; }
-    setZipBusy(true); setZipError(null); setZipNotice('Sending to Hosting...'); setImportPhase('uploading'); clearTimeout(phaseTimer.current); phaseTimer.current = setTimeout(() => setImportPhase('building'), 1000);
+    setZipBusy(true); setZipError(null); setZipNotice('Sending to Glondia Hosting...'); setImportPhase('uploading'); clearTimeout(phaseTimer.current); phaseTimer.current = setTimeout(() => setImportPhase('building'), 1000);
     try {
       const effectiveZipName = renderConfig.serviceName.trim() || zipFile.name.replace(/\.zip$/i, '');
       const result = await createZipHostingDeployment(zipFile, {
+        projectId: initialProjectId || undefined,
+        clientProjectId: initialProjectId || undefined,
         // Identity
         siteName: effectiveZipName, slug: effectiveZipName, serviceName: effectiveZipName,
-        // Hosting handoff settings
+        // Glondia launch settings
         environment: 'production',
+        hostingTarget,
+        dedicatedPlanId: dedicatedPlan?.id || '',
+        dedicatedPlanRegion: dedicatedPlan?.region || '',
+        dedicatedTier: dedicatedPlan?.tierKey || '',
         // Build settings
         buildCommand: isStaticSite ? (renderConfig.frontendBuildCommand || 'npm run build') : (renderConfig.backendBuildCommand || 'npm install && npm run build'),
         publishDirectory: renderConfig.frontendPublishDirectory || 'dist',
@@ -535,42 +496,53 @@ export function BuilderImport({ mode = 'github', navigate }) {
         rootDirectory: isStaticSite ? renderConfig.frontendRootDirectory : renderConfig.backendRootDirectory,
         // Deploy mode chosen in the detection preview (auto unless overridden)
         deployMode,
-        // Launch pricing tier (promo_50 or standard_200)
-        billingTierId,
         // Env vars (JSON-stringified — route parses it back)
         // Disk (web services only, JSON-stringified)
       });
-      clearTimeout(phaseTimer.current); setImportPhase('complete'); setZipNotice('ZIP handoff created. Opening Hosting detail...'); window.setTimeout(() => navigate({ view: 'hosting-detail', params: { id: result.deploymentId } }), 700);
+      clearTimeout(phaseTimer.current); setImportPhase('complete'); setZipNotice('Launch created. Opening Hosting detail...'); window.setTimeout(() => navigate({ view: 'hosting-detail', params: { id: result.deploymentId } }), 700);
     } catch (err) { setZipError(err.message || 'ZIP upload failed.'); setZipNotice(''); setImportPhase('error'); } finally { setZipBusy(false); }
   };
 
   const activeError = activeMode === 'zip' ? zipError : gitError;
+  const showLaunchConsole = importStarted || Boolean(activeError);
 
   return (
     <>
-      <div className="page-head"><div><a className="page-eyebrow" href="#" onClick={(e) => { e.preventDefault(); navigate({ view: 'hosting-list' }); }}>Back to hosting</a><h1>{activeMode === 'zip' ? 'Upload ZIP to Hosting' : 'Upload from GitHub'}</h1><p className="sub">Prepare source from GitHub or a ZIP package, then send the handoff to Hosting. Hosting owns the live deployment controls.</p></div></div>
+      <div className="page-head"><div><a className="page-eyebrow" href="#" onClick={(e) => { e.preventDefault(); navigate({ view: 'hosting-list' }); }}>Back to hosting</a><h1>{activeMode === 'zip' ? 'Launch from ZIP' : 'Launch from repository'}</h1><p className="sub">Prepare a website package, confirm the build settings, and publish it through Glondia Hosting.</p></div></div>
       <div className="tabs" style={{ marginBottom: 14 }}><button className={activeMode === 'github' ? 'active' : ''} onClick={() => { setActiveMode('github'); setImportPhase(repoUrl ? (detectedRepo ? 'detected' : 'checking') : 'idle'); }}><ICN.Git size={14} /> GitHub</button><button className={activeMode === 'zip' ? 'active' : ''} onClick={() => { setActiveMode('zip'); setImportPhase(zipFile ? 'zip_ready' : 'idle'); }}><ICN.Box size={14} /> ZIP upload</button></div>
-      <PricingTierSelector pricing={pricing} value={billingTierId} onChange={setBillingTierId} />
-      <div className="card card-flush builder-import-workspace" style={{ overflow: 'hidden' }}><div className="bld-split"><div className="github-pull-toggle"><div className="github-pull-head"><div className="github-pull-icon">{activeMode === 'zip' ? <ICN.Box size={18} /> : <ICN.Github size={18} />}</div><div><div className="eyebrow">{activeMode === 'zip' ? 'ZIP preparation' : 'GitHub preparation'}</div><h2>{activeMode === 'zip' ? 'Drag and drop to prepare' : 'Import from repository'}</h2></div></div>
+      <div className={`card card-flush builder-import-workspace ${showLaunchConsole ? '' : 'builder-import-workspace--single'}`} style={{ overflow: 'hidden' }}><div className="bld-split"><div className="github-pull-toggle"><div className="github-pull-head"><div className="github-pull-icon">{activeMode === 'zip' ? <ICN.Box size={18} /> : <ICN.Github size={18} />}</div><div><div className="eyebrow">{activeMode === 'zip' ? 'Website package' : 'Repository source'}</div><h2>{activeMode === 'zip' ? 'Drop your site package' : 'Import from repository'}</h2></div></div>
         {activeMode === 'github' ? (
           <GithubPreparePanel repoUrl={repoUrl} repoBranch={repoBranch} detectedRepo={detectedRepo} gitBusy={gitBusy} gitError={gitError} importPhase={importPhase} onRepoUrlChange={updateRepoUrl} onBranchChange={setRepoBranch} onImport={handleGitConnect} />
         ) : (
-          <div className="builder-import-pane">
+          <div className="builder-import-pane launch-section">
             <div onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragEnter={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()} style={{ border: `2px dashed ${zipFile ? 'var(--accent)' : dragging ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 'var(--r-lg)', padding: 28, textAlign: 'center', background: zipFile ? 'var(--accent-soft)' : dragging ? 'var(--accent-soft)' : 'var(--bg-deep)', cursor: 'pointer' }}>
               <input ref={fileInputRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" style={{ display: 'none' }} onClick={(e) => { e.currentTarget.value = ''; }} onChange={(e) => selectZip(e.target.files?.[0])} />
               <div style={{ width: 52, height: 52, borderRadius: 999, background: zipFile ? 'var(--accent)' : 'var(--accent-soft)', color: zipFile ? '#fff' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>{zipFile ? <ICN.CheckCircle size={24} /> : <ICN.Box size={24} />}</div>
-              <h3 style={{ margin: '0 0 6px' }}>{zipFile ? 'ZIP selected' : 'Drop your website ZIP here'}</h3>
-              <p className="muted" style={{ margin: 0, fontSize: 13 }}>{zipFile ? `${zipFile.name} • ${formatFileSize(zipFile.size)}` : 'ZIP must contain a deployable site with package.json or index.html. Node modules and .git folders are ignored.'}</p>
+              <h3 style={{ margin: '0 0 6px' }}>{zipFile ? 'Package selected' : 'Drop your website ZIP here'}</h3>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>{zipFile ? `${zipFile.name} • ${formatFileSize(zipFile.size)}` : 'Include package.json or index.html. Glondia ignores build caches, node_modules, and source-control folders.'}</p>
             </div>
             {zipFile && <div className="card" style={{ marginTop: 12, padding: 12, background: 'var(--bg-deep)', border: '1px solid var(--accent)' }}><div className="row between" style={{ gap: 10 }}><div><div style={{ fontWeight: 700 }}>Selected file</div><div className="mono muted" style={{ fontSize: 12 }}>{zipFile.name} · {formatFileSize(zipFile.size)}</div></div><button className="btn btn-sm btn-outline" onClick={clearZip} disabled={zipBusy}>Remove</button></div></div>}
-            {zipFile && <ZipDetectionPreview validation={zipValidation} validating={zipValidating} deployMode={deployMode} onDeployModeChange={setDeployMode} graceHours={pricing?.graceHours || 12} />}
+            {zipFile && <ZipDetectionPreview validation={zipValidation} validating={zipValidating} deployMode={deployMode} onDeployModeChange={setDeployMode} />}
             {zipConfig && (
               <div className="card" style={{ marginTop: 12, padding: 12, background: 'var(--bg-deep)', fontSize: 13 }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>Hosting handoff status</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div><span style={{ color: zipConfig.renderApiConfigured ? 'var(--accent)' : 'var(--danger)' }}>{zipConfig.renderApiConfigured ? '✓' : '✗'}</span> Hosting API: {zipConfig.renderApiConfigured ? 'configured' : 'not configured'}</div>
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>Glondia platform readiness</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[
+                    { id: 'glondia-hosting', role: 'website-upload', configured: true },
+                    { id: 'glondia-domains', role: 'domain-dns', configured: true },
+                  ].map((provider) => (
+                    <div key={provider.id} className="row between" style={{ gap: 10, alignItems: 'flex-start' }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{provider.role === 'domain-dns' ? 'Domains' : 'Publishing'}</div>
+                        <div className="muted" style={{ fontSize: 11 }}>{provider.role === 'domain-dns' ? 'Domain connection and DNS checks' : 'ZIP and repository sites publish through Glondia Hosting'}</div>
+                      </div>
+                      <span style={{ color: provider.configured ? 'var(--accent)' : 'var(--danger)', fontWeight: 700 }}>
+                        Ready
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                {zipConfig.missing?.length > 0 && <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>Missing: {zipConfig.missing.join(', ')}</div>}
+                <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>Glondia will unpack, build, and publish the site on your hosting server.</div>
               </div>
             )}
             {zipNotice && <div style={{ marginTop: 10, color: 'var(--accent)', fontSize: 13 }}>{zipNotice}</div>}
@@ -578,13 +550,50 @@ export function BuilderImport({ mode = 'github', navigate }) {
           </div>
         )}
 
-        {/* ── Hosting handoff panel ──────────────────────────────────── */}
-        <div className="render-config-panel">
+        {/* ── Hosting launch panel ──────────────────────────────────── */}
+        <div className="render-config-panel launch-section">
           <div className="row between" style={{ marginBottom: 6 }}>
-            <div><div className="eyebrow">Hosting Handoff</div></div>
-            <div className="tabs" style={{ margin: 0, fontSize: 12 }}>
-              <button className={settingsMode === 'basic' ? 'active' : ''} onClick={() => setSettingsMode('basic')} style={{ padding: '4px 10px' }}>Basic</button>
+            <div><div className="eyebrow">Glondia Launch</div></div>
+          </div>
+
+          <div className="card" style={{ padding: 12, marginBottom: 12, background: 'var(--bg-deep)' }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Hosting destination</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+              {[
+                { id: 'shared', label: 'Shared Hosting', note: 'Managed by Glondia' },
+                { id: 'vultr', label: 'Dedicated Hosting', note: 'Private resources' },
+              ].map((target) => (
+                <button
+                  key={target.id}
+                  type="button"
+                  className={`btn btn-sm ${hostingTarget === target.id ? 'btn-primary' : 'btn-outline'}`}
+                  style={{ display: 'grid', height: 'auto', padding: 9 }}
+                  disabled
+                >
+                  <span>{target.label}</span>
+                  <small style={{ opacity: 0.75 }}>{target.note}</small>
+                </button>
+              ))}
             </div>
+            {hostingTarget === 'shared' && !isStaticSite && (
+              <div style={{ color: 'var(--warning)', fontSize: 12, marginTop: 8 }}>
+                Full web applications require Dedicated Hosting. Shared Hosting currently supports static builds.
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 12 }}>
+            {[
+              ['1', 'Source', activeMode === 'zip' ? (zipFile ? 'Package ready' : 'Choose ZIP') : (detectedRepo ? 'Repo ready' : 'Connect repo')],
+              ['2', 'Build', isStaticSite ? renderConfig.frontendBuildCommand : renderConfig.backendBuildCommand],
+              ['3', 'Publish', isStaticSite ? renderConfig.frontendPublishDirectory : renderConfig.backendStartCommand],
+            ].map(([step, title, value]) => (
+              <div key={step} className="card" style={{ padding: 10, background: 'var(--bg-deep)', borderRadius: 'var(--r-md)' }}>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>Step {step}</div>
+                <div style={{ fontWeight: 800, fontSize: 13 }}>{title}</div>
+                <div className="mono muted" style={{ fontSize: 11, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || 'Not set'}</div>
+              </div>
+            ))}
           </div>
 
           {/* Preset chips */}
@@ -596,9 +605,9 @@ export function BuilderImport({ mode = 'github', navigate }) {
           {presetNotice && <div style={{ color: 'var(--accent)', fontSize: 12, marginBottom: 8 }}>{presetNotice}</div>}
 
           {/* Basic settings — always visible */}
-          <h3 style={{ margin: '0 0 8px', fontSize: 13 }}>Handoff Settings</h3>
+          <h3 style={{ margin: '0 0 8px', fontSize: 13 }}>Launch Settings</h3>
           <div className="render-config-grid render-config-grid--compact">
-            <label><span>Handoff name</span><input className="input mono" value={renderConfig.serviceName} onChange={(e) => updateRenderConfig('serviceName', e.target.value)} placeholder={activeMode === 'zip' && zipFile ? zipFile.name.replace(/\.zip$/i, '') : detectedRepo ? detectedRepo.repo : 'my-site'} /></label>
+            <label><span>Site name</span><input className="input mono" value={renderConfig.serviceName} onChange={(e) => updateRenderConfig('serviceName', e.target.value)} placeholder={activeMode === 'zip' && zipFile ? zipFile.name.replace(/\.zip$/i, '') : detectedRepo ? detectedRepo.repo : 'my-site'} /></label>
           </div>
 
           {/* Build settings — always visible */}
@@ -667,7 +676,7 @@ export function BuilderImport({ mode = 'github', navigate }) {
             </>)}
           </>)}
 
-          {/* Handoff Doctor + Summary — compact stack */}
+          {/* Launch checks + summary - compact stack */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
             <HandoffReadinessCard config={flatConfig} context={doctorContext} onApplyFix={applyDeployFix} />
             <HandoffSummaryCard config={flatConfig} />
@@ -676,10 +685,10 @@ export function BuilderImport({ mode = 'github', navigate }) {
           {/* Action buttons */}
           <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
             {activeMode === 'zip'
-              ? <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleZipDeploy} disabled={zipBusy || !zipFile}>
-                  <ICN.Rocket size={14} /> {zipBusy ? 'Handing off…' : zipFile ? 'Send to Hosting' : 'Choose ZIP first'}
+              ? <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleZipDeploy} disabled={zipBusy || !zipFile || (hostingTarget === 'shared' && !isStaticSite)}>
+                  <ICN.Rocket size={14} /> {zipBusy ? 'Launching...' : zipFile ? 'Publish with Glondia' : 'Choose ZIP first'}
                 </button>
-              : <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleGitConnect} disabled={gitBusy || importPhase === 'complete' || !detectedRepo}>
+              : <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleGitConnect} disabled={gitBusy || importPhase === 'complete' || !detectedRepo || (hostingTarget === 'shared' && !isStaticSite)}>
                   <ICN.Git size={14} /> {importPhase === 'complete' ? 'Opening…' : gitBusy ? 'Importing…' : 'Import source'}
                 </button>}
             <button
@@ -692,7 +701,7 @@ export function BuilderImport({ mode = 'github', navigate }) {
             </button>
           </div>
         </div>
-      </div><div className="bld-preview"><ImportProgressPreview phase={importPhase} repo={detectedRepo} branch={repoBranch || 'main'} error={activeError} showLoader={importStarted} isImporting={isImporting} zipFile={activeMode === 'zip' ? zipFile : null} /></div></div></div>
+      </div>{showLaunchConsole && <div className="bld-preview"><LaunchLogPanel phase={importPhase} repo={detectedRepo} branch={repoBranch || 'main'} error={activeError} zipFile={activeMode === 'zip' ? zipFile : null} validation={zipValidation} validating={zipValidating} /></div>}</div></div>
     </>
   );
 }

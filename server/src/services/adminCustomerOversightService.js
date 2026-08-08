@@ -25,6 +25,7 @@ import { listByOwners as listProviderResourcesByOwners } from '../repositories/p
 import { listAllTickets } from './ticketService.js';
 import { readHostingStore } from './hostingStore.js';
 import { groupAmountsByCurrency, resolveCustomerOwnershipScope } from './adminCustomerScope.js';
+import { computeServiceWarnings } from './serviceDriftWarnings.js';
 
 function httpError(message, status = 400, code = undefined) {
   return Object.assign(new Error(message), { status, code, expose: true });
@@ -50,6 +51,37 @@ async function section(name, warnings, fallback, fn) {
   }
 }
 
+function page(items, { limit = 50, offset = 0 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+  const list = Array.isArray(items) ? items : [];
+  return {
+    items: list.slice(safeOffset, safeOffset + safeLimit),
+    total: list.length,
+    limit: safeLimit,
+    offset: safeOffset,
+  };
+}
+
+function sortDesc(items, field = 'createdAt') {
+  return [...(items ?? [])].sort((a, b) => String(b?.[field] || '').localeCompare(String(a?.[field] || '')));
+}
+
+function dateInRange(row, { dateFrom, dateTo } = {}, field = 'createdAt') {
+  const value = row?.[field] ? new Date(row[field]).getTime() : null;
+  if (!value) return true;
+  if (dateFrom && value < new Date(dateFrom).getTime()) return false;
+  if (dateTo && value > new Date(dateTo).getTime()) return false;
+  return true;
+}
+
+function matchesFilters(row, filters = {}) {
+  return Object.entries(filters).every(([key, value]) => {
+    if (value === undefined || value === null || value === '') return true;
+    return String(row?.[key] ?? '').toLowerCase() === String(value).toLowerCase();
+  });
+}
+
 // ─── Customer header ──────────────────────────────────────────────────────────
 
 async function loadCustomer(userId) {
@@ -69,7 +101,7 @@ async function loadCustomer(userId) {
 
 function normalizeService({
   id, serviceType, serviceName, status, providerStatus = null, provider = null,
-  plan = null, price = null, access = null, source = 'record', updatedAt = null,
+  plan = null, price = null, access = null, source = 'record', details = null, updatedAt = null,
 }) {
   return {
     id,
@@ -86,6 +118,7 @@ function normalizeService({
     expiresAt: access?.expiresAt ?? null,
     serviceAccessId: access?.id ?? null,
     source,
+    details,
     updatedAt,
   };
 }
@@ -150,6 +183,21 @@ export async function resolveCustomerServices(userId) {
       plan: r.plan,
       price: { totalPriceCents: r.totalPriceCents, currency: r.currency },
       access,
+      details: {
+        hostname: r.hostname,
+        mainIp: r.mainIp ?? null,
+        region: r.region,
+        plan: r.plan,
+        osId: r.osId,
+        osName: r.osName ?? null,
+        vcpuCount: r.vcpuCount ?? null,
+        ramMb: r.ramMb ?? null,
+        diskGb: r.diskGb ?? null,
+        paymentStatus: r.paymentStatus,
+        providerInstanceId: r.providerInstanceId,
+        checkoutOrderId: r.checkoutOrderId ?? null,
+        createdAt: r.createdAt,
+      },
       updatedAt: r.updatedAt,
     }));
   }
@@ -237,12 +285,15 @@ export async function resolveCustomerServices(userId) {
     }
   }
 
+  // Payment/access/provider drift over the fully-resolved DTOs (pure, no I/O).
+  warnings.push(...computeServiceWarnings(services, { userId: scope.userId, organizationIds: orgIds }));
+
   return { services, warnings, accessRows };
 }
 
 // ─── Sections ─────────────────────────────────────────────────────────────────
 
-export async function getCustomerBilling(userId) {
+async function loadCustomerBillingRows(userId) {
   const customer = await loadCustomer(userId);
   const orgIds = (await loadOwnershipScope(customer)).organizationIds;
   const [orders, receipts, subscriptions, invoices, creditNotes, paymentMethods] = await Promise.all([
@@ -256,16 +307,41 @@ export async function getCustomerBilling(userId) {
   return { orders, receipts, subscriptions, invoices, creditNotes, paymentMethods };
 }
 
-export async function getCustomerSupport(userId) {
+export async function getCustomerBilling(userId, options = {}) {
+  const { orders, receipts, subscriptions, invoices, creditNotes, paymentMethods } = await loadCustomerBillingRows(userId);
+  const filterBilling = (rows) => sortDesc(rows)
+    .filter((row) => matchesFilters(row, { status: options.status, currency: options.currency }))
+    .filter((row) => dateInRange(row, options));
+  return {
+    orders: page(filterBilling(orders), options),
+    receipts: page(filterBilling(receipts), options),
+    subscriptions: page(sortDesc(subscriptions), options),
+    invoices: page(filterBilling(invoices), options),
+    creditNotes: page(filterBilling(creditNotes), options),
+    paymentMethods: page(sortDesc(paymentMethods), options),
+  };
+}
+
+async function loadCustomerSupportRows(userId) {
   const customer = await loadCustomer(userId);
   const [tickets, serviceRequests] = await Promise.all([
     listAllTickets({ userId, limit: 100 }),
     customerRepo.listServiceRequestsByUser(userId, customer.email),
   ]);
-  return { tickets: tickets.items, serviceRequests };
+  return { tickets: tickets.items ?? [], serviceRequests };
 }
 
-export async function getCustomerOperations(userId) {
+export async function getCustomerSupport(userId, options = {}) {
+  const { tickets, serviceRequests } = await loadCustomerSupportRows(userId);
+  const filteredTickets = sortDesc(tickets)
+    .filter((row) => matchesFilters(row, { status: options.status, priority: options.priority, category: options.category }));
+  return {
+    tickets: page(filteredTickets, options),
+    serviceRequests: page(sortDesc(serviceRequests), options),
+  };
+}
+
+export async function getCustomerOperations(userId, options = {}) {
   const customer = await loadCustomer(userId);
   const orgIds = (await loadOwnershipScope(customer)).organizationIds;
   const { services } = await resolveCustomerServices(userId);
@@ -280,8 +356,7 @@ export async function getCustomerOperations(userId) {
     operationsRepo.listNotificationsForCustomer(userId),
   ]);
 
-  return {
-    providerResources: providerResources.map((r) => ({
+  const safeProviderResources = providerResources.map((r) => ({
       id: r.id,
       provider: r.provider,
       resourceType: r.resourceType,
@@ -291,27 +366,40 @@ export async function getCustomerOperations(userId) {
       serviceId: r.serviceId,
       deletedAt: r.deletedAt,
       createdAt: r.createdAt,
-    })),
-    healthChecks,
-    incidents,
-    watchdogEvents,
-    notifications,
+    }))
+    .filter((row) => matchesFilters(row, { resourceType: options.resourceType, status: options.status, provider: options.provider }))
+    .filter((row) => dateInRange(row, options));
+  return {
+    providerResources: page(sortDesc(safeProviderResources), options),
+    healthChecks: page(sortDesc(healthChecks, 'checkedAt').filter((row) => matchesFilters(row, { status: options.status })), options),
+    incidents: page(sortDesc(incidents).filter((row) => matchesFilters(row, { status: options.status })), options),
+    watchdogEvents: page(sortDesc(watchdogEvents).filter((row) => matchesFilters(row, { status: options.status })), options),
+    notifications: page(sortDesc(notifications), options),
   };
 }
 
-export async function getCustomerActivity(userId, { limit = 50, offset = 0 } = {}) {
+export async function getCustomerActivity(userId, options = {}) {
+  const { limit = 50 } = options;
   const customer = await loadCustomer(userId);
   const orgIds = (await loadOwnershipScope(customer)).organizationIds;
   const [audit, adminCommands] = await Promise.all([
-    auditRepo.listAuditForCustomer(userId, orgIds, { limit, offset }),
+    auditRepo.listAuditForCustomer(userId, orgIds, options),
     auditRepo.listAdminCommandsForCustomer(userId, { limit: 25 }),
   ]);
   return { audit, adminCommands };
 }
 
-export async function getCustomerServices(userId) {
+export async function getCustomerServices(userId, options = {}) {
   const { services, warnings } = await resolveCustomerServices(userId);
-  return { services, warnings };
+  const filtered = services
+    .filter((row) => matchesFilters(row, {
+      serviceType: options.serviceType,
+      status: options.status,
+      provider: options.provider,
+      accessStatus: options.accessStatus,
+      billingStatus: options.billingStatus,
+    }));
+  return { ...page(sortDesc(filtered, 'updatedAt'), options), warnings };
 }
 
 // ─── Unified overview ─────────────────────────────────────────────────────────
@@ -320,36 +408,45 @@ export async function getCustomerOverview(userId) {
   const customer = await loadCustomer(userId); // hard 404 if missing
   const warnings = [];
 
-  const [projects, resolved, billing, support, operations, activity] = await Promise.all([
+  const ownership = await loadOwnershipScope(customer);
+  const [projects, resolved, billing, support, operations, activity, analytics, notes] = await Promise.all([
     section('projects', warnings, [], () => customerRepo.listCustomerProjects(userId)),
     section('services', warnings, { services: [], warnings: [] }, () => resolveCustomerServices(userId)),
-    section('billing', warnings, { orders: [], receipts: [], subscriptions: [], invoices: [], creditNotes: [], paymentMethods: [] }, () => getCustomerBilling(userId)),
-    section('support', warnings, { tickets: [], serviceRequests: [] }, () => getCustomerSupport(userId)),
-    section('operations', warnings, { providerResources: [], healthChecks: [], incidents: [], watchdogEvents: [], notifications: [] }, () => getCustomerOperations(userId)),
-    section('activity', warnings, { audit: { items: [], total: 0 }, adminCommands: [] }, () => getCustomerActivity(userId, { limit: 25 })),
+    section('billing', warnings, { orders: [], receipts: [], subscriptions: [], invoices: [], creditNotes: [], paymentMethods: [] }, () => loadCustomerBillingRows(userId)),
+    section('support', warnings, { tickets: [], serviceRequests: [] }, () => loadCustomerSupportRows(userId)),
+    section('operations', warnings, { providerResources: page([]), healthChecks: page([]), incidents: page([]), watchdogEvents: page([]), notifications: page([]) }, () => getCustomerOperations(userId, { limit: 5 })),
+    section('activity', warnings, { audit: { items: [], total: 0 }, adminCommands: [] }, () => getCustomerActivity(userId, { limit: 10 })),
+    section('analytics', warnings, [], () => customerRepo.listAnalyticsForCustomer(userId, ownership.organizationIds)),
+    section('notes', warnings, [], () => customerRepo.listAdminNotesForCustomer(userId)),
   ]);
 
   warnings.push(...(resolved.warnings ?? []));
-  const services = resolved.services ?? [];
+  const allServices = sortDesc(resolved.services ?? [], 'updatedAt');
+  const services = allServices.slice(0, 6);
+  const sortedBilling = Object.fromEntries(Object.entries(billing).map(([key, rows]) => [key, sortDesc(rows)]));
+  const sortedSupport = {
+    tickets: sortDesc(support.tickets),
+    serviceRequests: sortDesc(support.serviceRequests),
+  };
 
   const ACTIVE = new Set(['active', 'running', 'live', 'deployed']);
   const FAILED = new Set(['error', 'failed', 'destroy_failed', 'provider_missing', 'record_missing']);
   const SUSPENDED = new Set(['suspended', 'account_suspended', 'stopped', 'halted']);
 
-  const openTickets = (support.tickets ?? []).filter((t) => !['resolved', 'closed'].includes(t.status));
-  const pendingOrders = (billing.orders ?? []).filter((o) => ['pending', 'payment_uploaded'].includes(o.status));
+  const openTickets = sortedSupport.tickets.filter((t) => !['resolved', 'closed'].includes(t.status));
+  const pendingOrders = sortedBilling.orders.filter((o) => ['pending', 'payment_uploaded'].includes(o.status));
   const outstandingByCurrency = groupAmountsByCurrency(pendingOrders);
 
   const summary = {
     projects: projects.length,
-    services: services.length,
-    activeServices: services.filter((s) => ACTIVE.has(s.status)).length,
-    failedServices: services.filter((s) => FAILED.has(s.status)).length,
-    suspendedServices: services.filter((s) => SUSPENDED.has(s.status) || s.adminStatus === 'blocked').length,
+    services: allServices.length,
+    activeServices: allServices.filter((s) => ACTIVE.has(s.status)).length,
+    failedServices: allServices.filter((s) => FAILED.has(s.status)).length,
+    suspendedServices: allServices.filter((s) => SUSPENDED.has(s.status) || s.adminStatus === 'blocked').length,
     openTickets: openTickets.length,
     urgentTickets: openTickets.filter((t) => t.priority === 'urgent').length,
     pendingOrders: pendingOrders.length,
-    pendingReceipts: (billing.receipts ?? []).filter((r) => r.status === 'pending').length,
+    pendingReceipts: sortedBilling.receipts.filter((r) => r.status === 'pending').length,
     outstandingByCurrency,
     warnings: warnings.length,
   };
@@ -357,13 +454,32 @@ export async function getCustomerOverview(userId) {
   return {
     customer,
     summary,
-    projects,
+    projects: projects.slice(0, 5),
     services,
-    billing,
-    support,
-    operations,
+    billing: {
+      orders: sortedBilling.orders.slice(0, 5),
+      receipts: sortedBilling.receipts.slice(0, 5),
+      subscriptions: sortedBilling.subscriptions.slice(0, 5),
+      invoices: sortedBilling.invoices.slice(0, 5),
+      creditNotes: sortedBilling.creditNotes.slice(0, 5),
+      paymentMethods: sortedBilling.paymentMethods.slice(0, 5),
+    },
+    support: {
+      tickets: sortedSupport.tickets.slice(0, 5),
+      serviceRequests: sortedSupport.serviceRequests.slice(0, 5),
+    },
+    operations: {
+      providerResources: operations.providerResources.items,
+      healthChecks: operations.healthChecks.items,
+      incidents: operations.incidents.items,
+      watchdogEvents: operations.watchdogEvents.items,
+      notifications: operations.notifications.items,
+    },
     activity: activity.audit?.items ?? [],
     adminCommands: activity.adminCommands ?? [],
+    analytics,
+    notes,
+    ownership: { organizationIds: ownership.organizationIds },
     warnings,
   };
 }

@@ -1,4 +1,4 @@
-import { normalizeRenderPlan, renderPlanMap } from '../config/deploymentBilling.js';
+import { normalizeRenderPlan, renderPlanMap } from '../config/hostingLifecycle.js';
 
 const RENDER_BASE_URL = process.env.RENDER_API_BASE_URL || 'https://api.render.com/v1';
 
@@ -8,15 +8,13 @@ const RENDER_BASE_URL = process.env.RENDER_API_BASE_URL || 'https://api.render.c
  * paid plans are applied later via updateWebServiceSettings after verified payment.
  *
  *   trial_free     → free      (normal ZIP/GitHub deploy)
- *   promo_paid     → starter   (K50 promo, post-payment)
- *   standard_paid  → standard  (K200 standard, post-payment)
+ *   paid_default   → configured paid Render plan
  *   admin_override → normalized input.plan (admin/staff only), defaulting free
  *   (anything else / missing) → free
  */
 function resolveRenderPlanForPayload(input = {}) {
-  if (input.renderPlanIntent === 'trial_free') return renderPlanMap.trial_free;
-  if (input.renderPlanIntent === 'promo_paid') return renderPlanMap.promo_50;
-  if (input.renderPlanIntent === 'standard_paid') return renderPlanMap.standard_200;
+  if (input.renderPlanIntent === 'trial_free') return renderPlanMap.trial;
+  if (input.renderPlanIntent === 'paid_default' || input.renderPlanIntent === 'standard_paid') return renderPlanMap.paidDefault;
   if (input.renderPlanIntent === 'admin_override') return normalizeRenderPlan(input.plan, 'free');
   return 'free';
 }

@@ -3,6 +3,8 @@
  */
 import { liveApiRequest } from '../api.js';
 import { getStoredAuth } from './auth.js';
+import { getActiveServiceSandbox } from '../features/sandbox/sandboxState.js';
+import { sandboxBillingSummary } from '../features/sandbox/sandboxFixtures.js';
 
 /**
  * The deploy-first billing summary for the signed-in user:
@@ -12,9 +14,15 @@ import { getStoredAuth } from './auth.js';
  * authenticated user, not the workspace id — so the stored organization id (or
  * a placeholder) is sufficient.
  */
-export function getBillingSummary() {
+export function getBillingSummary({ serviceType = null, serviceId = null } = {}) {
+  const sandbox = getActiveServiceSandbox();
+  if (sandbox?.service === 'billing') return Promise.resolve(sandboxBillingSummary(sandbox));
   const workspaceId = getStoredAuth()?.organizationId || 'me';
-  return liveApiRequest(`/v1/workspaces/${encodeURIComponent(workspaceId)}/billing/summary`);
+  const query = new URLSearchParams();
+  if (serviceType) query.set('serviceType', serviceType);
+  if (serviceId) query.set('serviceId', serviceId);
+  const suffix = query.size ? `?${query.toString()}` : '';
+  return liveApiRequest(`/v1/workspaces/${encodeURIComponent(workspaceId)}/billing/summary${suffix}`);
 }
 
 /** Admin-only: all-tenant billing overview. Caller must be an admin. */

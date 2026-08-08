@@ -1,16 +1,16 @@
 export const HOSTING_TABS = [
-  'Overview',
-  'Deploy History',
-  'Build Logs',
-  'Metrics',
-  'Hosting Settings',
-  'Env Vars',
-  'Secret Files',
-  'Headers',
-  'Rules',
-  'Disks',
-  'Domains',
-  'Billing',
+  { value: 'Overview', label: 'Overview', icon: 'LayoutDashboard', iconOnly: true },
+  { value: 'Deploy History', label: 'Deploy History', icon: 'Git', iconOnly: true },
+  { value: 'Build Logs', label: 'Build Logs', icon: 'Terminal', iconOnly: true },
+  { value: 'Metrics', label: 'Metrics', icon: 'ChartBar', iconOnly: true },
+  { value: 'Hosting Settings', label: 'Hosting Settings', icon: 'Settings', iconOnly: true },
+  { value: 'Env Vars', label: 'Env Vars', icon: 'Database', iconOnly: true },
+  { value: 'Secret Files', label: 'Secret Files', icon: 'File', iconOnly: true },
+  { value: 'Headers', label: 'Headers', icon: 'ShieldCheck', iconOnly: true },
+  { value: 'Webhooks', label: 'Webhooks', icon: 'Zap', iconOnly: true },
+  { value: 'Disks', label: 'Disks', icon: 'Box', iconOnly: true },
+  { value: 'Domains', label: 'Domains', icon: 'Globe', iconOnly: true },
+  { value: 'Billing', label: 'Billing', icon: 'CreditCard', iconOnly: true },
 ];
 
 export function hasRealRenderId(id) {

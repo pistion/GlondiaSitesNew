@@ -9,6 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { builderProjectsApi, newIdempotencyKey } from '../../../api/builder-projects.js';
 import { useBuilderProject, useBuilderJob } from './useBuilderProject.js';
+import { ICN } from '../../../icons.jsx';
 
 const STEPS = [
   { key: 'plan', label: 'Plan' },
@@ -63,20 +64,39 @@ function ProjectsList({ navigate }) {
   };
 
   return (
-    <div>
-      <div className="row between" style={{ marginBottom: 16 }}>
+    <div className="builder-projects-page">
+      <div className="builder-projects-head">
+        <button
+          className="builder-projects-back"
+          type="button"
+          onClick={() => navigate({ view: 'builder-gallery' })}
+          title="Back to Site Builder"
+        >
+          <ICN.ArrowLeft size={18} />
+        </button>
         <div>
           <div className="page-eyebrow">Site Builder</div>
-          <h1 style={{ margin: '4px 0 0' }}>Your projects</h1>
+          <h1>Your projects</h1>
+          <p className="muted">Saved work and new site starts live here.</p>
+        </div>
+        <div className="builder-projects-new-actions">
+          <button className="btn btn-primary" disabled={creating} onClick={() => createProject('pulse-works', 'New Pulse site')}>
+            {creating ? 'Creating...' : 'Build from Pulse Works'}
+          </button>
+          <button className="btn btn-outline" disabled={creating} onClick={() => createProject('forge', 'New Forge site')}>
+            Build from Forge
+          </button>
         </div>
       </div>
 
       <ErrorNote error={error} />
 
-      <div className="card" style={{ padding: 18, marginBottom: 18 }}>
-        <h3 style={{ marginTop: 0 }}>Start a new site</h3>
-        <p className="muted" style={{ fontSize: 13 }}>Build from a template. Your progress saves to the server and survives refresh.</p>
-        <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+      <div className="builder-projects-intro">
+        <div>
+          <h2>Start a new site</h2>
+          <p>Build from a template. Your progress saves to the server and survives refresh.</p>
+        </div>
+        <div className="builder-projects-inline-actions">
           <button className="btn btn-primary" disabled={creating} onClick={() => createProject('pulse-works', 'New Pulse site')}>
             {creating ? 'Creating…' : 'Build from Pulse Works'}
           </button>
@@ -86,20 +106,23 @@ function ProjectsList({ navigate }) {
         </div>
       </div>
 
-      <h3>Saved projects</h3>
+      <div className="builder-projects-section-head">
+        <h3>Saved projects</h3>
+      </div>
       {projects === null && <p className="muted">Loading…</p>}
       {projects && projects.length === 0 && <p className="muted">No projects yet — start one above.</p>}
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div className="builder-project-list">
         {(projects || []).map((p) => (
           <button
             key={p.id}
-            className="card"
-            style={{ padding: 14, textAlign: 'left', cursor: 'pointer' }}
+            className="builder-project-row"
             onClick={() => navigate({ view: 'builder-project', params: { projectId: p.id, step: 'plan' } })}
           >
-            <div className="row between">
+            <div className="builder-project-row-main">
               <strong>{p.name}</strong>
-              <StatusPill status={p.status} />
+              <small>Updated {new Date(p.updatedAt).toLocaleString()}</small>
+              <ICN.ArrowRight size={16} />
+              <span>{p.templateId} · v{p.version}</span>
             </div>
             <div className="muted" style={{ fontSize: 12 }}>{p.templateId} · v{p.version} · updated {new Date(p.updatedAt).toLocaleString()}</div>
           </button>

@@ -1,4 +1,4 @@
-import * as vultr from './vultrApiService.js';
+import { listCachedPlans } from './vpsCatalogService.js';
 
 const MARKUP_PERCENT = Number(process.env.PLATFORM_MARKUP_PERCENT ?? 30);
 
@@ -13,9 +13,14 @@ export function calcPricing(planMonthlyCost) {
  * and the exact markup stay internal (calcPricing) — never expose them here.
  */
 export async function getQuote(planId, region, osId) {
-  const plans = await vultr.listPlans();
+  const plans = await listCachedPlans(undefined, { region });
   const plan = plans.find((p) => p.id === planId);
-  if (!plan) throw Object.assign(new Error(`Plan "${planId}" not found.`), { status: 404 });
+  if (!plan) {
+    throw Object.assign(
+      new Error(`Plan "${planId}" is not available in region "${region}". Choose an available plan for this location.`),
+      { status: 400 },
+    );
+  }
   const { totalCents } = calcPricing(plan.monthly_cost);
   return {
     plan: planId, region, osId,

@@ -19,7 +19,6 @@ const BILLING_TABS = [
   { key: 'unpaid',           label: 'Unpaid' },
   { key: 'pending_receipts', label: 'Pending Receipts' },
   { key: 'failed',           label: 'Failed/Expired' },
-  { key: 'promo',            label: 'Promo' },
   { key: 'subscriptions',    label: 'Subscriptions' },
   { key: 'orders',           label: 'Orders' },
   { key: 'receipts',         label: 'All Receipts' },
@@ -48,7 +47,6 @@ export function AdminBillingTabs({ users, deployments, orders, receipts, busyId,
       const s = r.latestOrder?.status || '';
       return s === 'expired' || s === 'payment_expired';
     }),
-    promo:            allRows.filter((r) => r.isPromo),
     subscriptions:    allRows.filter((r) => {
       const s = r.deployment.subscriptionStatus;
       return s && s !== 'cancelled';
@@ -63,16 +61,8 @@ export function AdminBillingTabs({ users, deployments, orders, receipts, busyId,
   const unpaidBills = orders.filter((o) => o.status !== 'paid' && o.status !== 'expired' && o.status !== 'payment_expired').length;
   const expiredBills = orders.filter((o) => o.status === 'expired' || o.status === 'payment_expired').length;
   const pendingReceipts = receipts.filter((r) => r.status === 'pending').length;
-  const promoPaid = orders.filter((o) => {
-    const dep = deployments.find((d) => d.deploymentId === o.deploymentId);
-    return dep?.billingTierId === 'promo_50' && o.status === 'paid';
-  }).length;
-  const standardPaid = orders.filter((o) => {
-    const dep = deployments.find((d) => d.deploymentId === o.deploymentId);
-    return dep?.billingTierId === 'standard_200' && o.status === 'paid';
-  }).length;
-  const activeSubs = deployments.filter((d) => d.subscriptionStatus === 'active').length;
-  const currency = orders[0]?.currency || 'PGK';
+  const settledPayments = orders.filter((o) => o.status === 'paid').length;
+  const currency = orders[0]?.currency || 'USD';
 
   return (
     <div>
@@ -101,9 +91,7 @@ export function AdminBillingTabs({ users, deployments, orders, receipts, busyId,
             <StatCard label="Unpaid bills" value={unpaidBills} />
             <StatCard label="Expired bills" value={expiredBills} />
             <StatCard label="Pending receipts" value={pendingReceipts} />
-            <StatCard label="Promo payments" value={promoPaid} />
-            <StatCard label="Standard payments" value={standardPaid} />
-            <StatCard label="Active subscriptions" value={activeSubs} />
+            <StatCard label="Settled payments" value={settledPayments} />
           </div>
         </div>
       )}
@@ -133,23 +121,20 @@ function BillingTable({ rows, busyId, onAct, showReceipts }) {
               <th>Order ID</th>
               <th>Amount</th>
               <th>Currency</th>
-              <th>Tier</th>
               <th>Order Status</th>
               <th>Payment</th>
               <th>Receipt</th>
-              <th>Subscription</th>
               <th>Due Date</th>
               <th>Paid Date</th>
               <th>Next Billing</th>
-              <th>Promo</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={16} className="muted" style={{ padding: 20 }}>No records.</td></tr>
+              <tr><td colSpan={13} className="muted" style={{ padding: 20 }}>No records.</td></tr>
             )}
-            {rows.map(({ deployment: d, user, latestOrder: o, latestReceipt: r, isPromo }) => {
+            {rows.map(({ deployment: d, user, latestOrder: o, latestReceipt: r }) => {
               const depId = d.deploymentId;
               return (
                 <tr key={depId}>
@@ -164,17 +149,12 @@ function BillingTable({ rows, busyId, onAct, showReceipts }) {
                   <td className="mono" style={{ fontSize: 11 }}>{o?.id?.slice(0, 8) || '—'}</td>
                   <td style={{ fontSize: 12 }}>{o ? money(o.totalAmountCents, o.currency) : '—'}</td>
                   <td style={{ fontSize: 12 }}>{o?.currency || d.priceCurrency || '—'}</td>
-                  <td style={{ fontSize: 11 }}>{isPromo ? 'promo_50' : (d.billingTierId || '—')}</td>
                   <td>{o ? <StatusPill value={o.status} /> : <span className="muted">—</span>}</td>
                   <td><StatusPill value={d.paymentStatus} /></td>
                   <td>{r ? <StatusPill value={r.status} /> : <span className="muted">—</span>}</td>
-                  <td><StatusPill value={d.subscriptionStatus || 'trialing'} /></td>
                   <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{when(d.billingDueAt)}</td>
                   <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{when(o?.paidAt)}</td>
                   <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{when(d.nextBillingAt)}</td>
-                  <td style={{ fontSize: 12 }}>
-                    {isPromo ? <StatusPill value="promo" /> : <span className="muted">—</span>}
-                  </td>
                   <td>
                     <div className="admin-action-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
                       <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>

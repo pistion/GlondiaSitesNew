@@ -1,9 +1,12 @@
+import './config/env.js';
+
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { extname, join, resolve } from 'node:path';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import morgan from 'morgan';
-import dotenv from 'dotenv';
 
 import { requestId } from './middleware/request-id.middleware.js';
 import { responseHelper } from './middleware/response.middleware.js';
@@ -20,6 +23,7 @@ import workspaceDetailRoutes from './routes/workspace-detail.routes.js';
 import projectRoutes from './routes/project.routes.js';
 import domainPublicRoutes from './routes/domain-public.routes.js';
 import domainRoutes from './routes/domain.routes.js';
+import customerDomainRoutes from './routes/customer-domains.routes.js';
 import siteRoutes from './routes/site.routes.js';
 import publicSalesRoutes from './routes/public-sales.routes.js';
 import commerceRoutes from './routes/commerce.routes.js';
@@ -37,6 +41,7 @@ import environmentRoutes from './routes/environmentRoutes.js';
 import domainHostingRoutes from './routes/domainRoutes.js';
 import diskRoutes from './routes/diskRoutes.js';
 import vpsHostingRoutes from './routes/vpsHostingRoutes.js';
+import cloudStorageRoutes from './routes/cloudStorage.routes.js';
 import paymentsRoutes from './routes/payments.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import {
@@ -49,24 +54,44 @@ import emailRoutes from './routes/email.routes.js';
 import glondiaMailRoutes from './routes/glondia-mail.routes.js';
 import providerRenderRoutes from './glondia-engines/01-HOSTING-DEPLOY-ENGINE/01-ROUTES/providerRender.routes.js';
 import sandboxRoutes from './glondia-engines/01-HOSTING-DEPLOY-ENGINE/01-ROUTES/sandbox.routes.js';
+import sandboxSimulationRoutes from './routes/sandbox-simulation.routes.js';
 import deploymentStreamRoutes from './glondia-engines/01-HOSTING-DEPLOY-ENGINE/01-ROUTES/deploymentStream.routes.js';
 import paymentsProviderRoutes from './routes/payments-provider.routes.js';
 import spaceshipRoutes from './routes/provider-spaceship.routes.js';
 import { providerApiGuard } from './glondia-engines/01-HOSTING-DEPLOY-ENGINE/services/providerApiGuard.service.js';
 import { verifyPaypalWebhook, handlePaypalWebhookEvent } from './services/paypalWebhookService.js';
-import { startDeploymentCleanupJob } from './services/deploymentCleanupService.js';
-import { warmForexCache } from './services/forexService.js';
+import { startEmailSyncScheduler } from './services/emailSyncService.js';
+import { startDomainSyncScheduler } from './services/customerDomainService.js';
+import { startBillingReconciliationScheduler } from './services/billingLifecycleService.js';
+import { seedVpsCatalog, startVpsCatalogScheduler } from './services/vpsCatalogService.js';
+import { startVpsServiceSyncScheduler } from './services/vpsHostingService.js';
+import hostingService from './services/hostingService.js';
+import {
+  seedCloudStorageCatalog,
+  startCloudStorageCatalogScheduler,
+} from './services/cloudStorageCatalogService.js';
 import {
   prisma,
   ensureUserColumns,
   ensureNotificationsTable,
   ensureClientProjectsTable,
   ensureDeploymentSubscriptionsTable,
+  ensurePaymentMethodsTable,
+  ensureBillingLedgerTable,
+  ensureBillingEvidenceTables,
   ensureServiceRequestsTable,
   ensureCrmEmailTables,
+  ensureEmailMailboxTables,
   ensureBuilderLifecycleTables,
   ensureProviderResourcesTable,
+  ensureHostingEnvVarsTable,
+  ensureHostingHeadersTable,
+  ensureHostingDisksTable,
+  ensureHostingMetricsTables,
   ensureVpsTenancyBackfill,
+  ensureVpsCatalogSnapshotsTable,
+  ensureDomainServiceSnapshotsTable,
+  ensureDomainAddonServicesTable,
   ensureTicketColumns,
 } from './services/db.js';
 import { auditWrites } from './middleware/audit.middleware.js';
@@ -77,10 +102,8 @@ import { durableJobsEnabled } from './builder/builderFlags.js';
 import { createBuilderWorker } from './builder/jobs/builderWorker.js';
 import builderPreviewRoutes from './builder/preview/previewRoutes.js';
 
-dotenv.config({ path: '.env.local' });
-dotenv.config();
-
 const app = express();
+const httpServer = createHttpServer(app);
 const isProd = process.env.NODE_ENV === 'production';
 // One process, one port: API + frontend always share this PORT.
 // Render injects PORT in production. Local default is 3001.
@@ -150,6 +173,26 @@ const corsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
   : (isProd ? false : true); // allow all in dev, same-origin only in production
 
+app.disable('x-powered-by');
+app.use(helmet({
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      baseUri: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+      fontSrc: ["'self'", 'data:'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      // Vite's development middleware injects an inline React Refresh
+      // bootstrap. Allow it only locally; production remains self-only.
+      scriptSrc: ["'self'", ...(isProd ? [] : ["'unsafe-inline'", "'unsafe-eval'"])],
+      connectSrc: ["'self'", 'https:', ...(isProd ? [] : ['ws:', 'wss:'])],
+      upgradeInsecureRequests: isProd ? [] : null,
+    },
+  },
+}));
 app.use(cors({ origin: corsOrigins, credentials: true }));
 
 // ── PayPal webhook ───────────────────────────────────────────────────────────
@@ -234,6 +277,7 @@ app.use('/api/spaceship', requireFeature('DOMAINS'), spaceshipRoutes);
 
 // ── Provider payment routes (PayPal client, domain+hosting checkout) ──────────
 app.use('/api/payments', paymentsProviderRoutes);
+app.use('/api/domains', requireFeature('DOMAINS'), customerDomainRoutes);
 
 // Sandbox preview routes (must come before SPA fallback)
 app.use('/sandbox', sandboxRoutes);
@@ -259,6 +303,8 @@ app.use('/api/v1/templates', requireFeature('SITE_BUILDER'), templateRoutes);
 app.use('/api/v1/builder', requireFeature('SITE_BUILDER'), builderRoutes);
 app.use('/api/template-ai', templateAiRoutes);
 app.use('/api/v1/events', eventsRoutes);
+app.use('/api/v1/sandbox', sandboxSimulationRoutes);
+app.use('/api/sandbox', sandboxSimulationRoutes);
 
 // Auth
 app.use('/api/v1/auth', authRoutes);
@@ -278,6 +324,7 @@ app.use('/api/v1/workspaces/:workspaceId/events', eventStreamRoutes);
 
 // VPS Services — Vultr-backed virtual servers.
 app.use('/api/v1/vps-hosting', requireFeature('VPS'), vpsHostingRoutes);
+app.use('/api/cloud-storage', cloudStorageRoutes);
 
 // Render-powered customer hosting surface used by the site builder and hosting dashboard.
 // deploymentStreamRoutes must come first so the SSE path is matched before the REST routes.
@@ -311,8 +358,9 @@ if (existsSync(adminDashDir)) {
       res.setHeader('Cache-Control', 'no-cache');
     },
   }));
-  // Dashboard shell: /dashboard and /dashboard/* → admin-dashboard/frontend/index.html
-  app.get(['/dashboard', '/dashboard/*'], (req, res) => {
+  // Admin shell. Keep /dashboard as a backwards-compatible alias while using
+  // /admin as the discoverable entry point from the signed-in application.
+  app.get(['/admin', '/admin/*', '/dashboard', '/dashboard/*'], (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     createReadStream(join(adminDashDir, 'index.html')).pipe(res);
   });
@@ -334,7 +382,10 @@ async function attachFrontend() {
       const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         configFile: join(rootDir, 'vite.config.js'),
-        server: { middlewareMode: true },
+        server: {
+          middlewareMode: true,
+          hmr: { server: httpServer },
+        },
         appType: 'spa',
       });
       app.use(vite.middlewares);
@@ -423,6 +474,13 @@ function startPaymentEnforcementJob() {
 // Starts only after DB bootstrap succeeds; a job never runs against missing
 // tables. Set BUILDER_WORKER_ENABLED=false to run an API-only instance.
 let builderWorker = null;
+let emailSyncScheduler = null;
+let domainSyncScheduler = null;
+let billingReconciliationScheduler = null;
+let vpsCatalogScheduler = null;
+let vpsServiceSyncScheduler = null;
+let cloudStorageCatalogScheduler = null;
+let hostingProviderSyncTimer = null;
 
 async function startBuilderWorkerIfEnabled() {
   const enabled = durableJobsEnabled()
@@ -443,6 +501,13 @@ function attachGracefulShutdown() {
     } catch (err) {
       console.error('[glondia] Worker shutdown error:', err.message);
     }
+    if (emailSyncScheduler) clearInterval(emailSyncScheduler);
+    if (domainSyncScheduler) clearInterval(domainSyncScheduler);
+    if (billingReconciliationScheduler) clearInterval(billingReconciliationScheduler);
+    vpsCatalogScheduler?.close();
+    vpsServiceSyncScheduler?.close();
+    cloudStorageCatalogScheduler?.close();
+    if (hostingProviderSyncTimer) clearInterval(hostingProviderSyncTimer);
     try { await prisma.$disconnect(); } catch { /* already gone */ }
     process.exit(0);
   };
@@ -456,7 +521,34 @@ async function boot() {
 
   if (process.env.NODE_ENV === 'test') return;
 
-  app.listen(PORT, '0.0.0.0', () => {
+  await prisma.$connect();
+  console.log('[glondia] Database connection established.');
+  await ensureUserColumns();
+  await ensureNotificationsTable();
+  await ensureClientProjectsTable();
+  await ensureDeploymentSubscriptionsTable();
+  await ensurePaymentMethodsTable();
+  await ensureBillingLedgerTable();
+  await ensureBillingEvidenceTables();
+  await ensureServiceRequestsTable();
+  await ensureCrmEmailTables();
+  await ensureEmailMailboxTables();
+  await ensureBuilderLifecycleTables();
+  await ensureProviderResourcesTable();
+  await ensureHostingEnvVarsTable();
+  await ensureHostingHeadersTable();
+  await ensureHostingDisksTable();
+  await ensureHostingMetricsTables();
+  await ensureVpsTenancyBackfill();
+  await ensureVpsCatalogSnapshotsTable();
+  await seedVpsCatalog();
+  await seedCloudStorageCatalog();
+  await ensureDomainServiceSnapshotsTable();
+  await ensureDomainAddonServicesTable();
+  await ensureTicketColumns();
+  await startBuilderWorkerIfEnabled();
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`[glondia] Single server listening on http://localhost:${PORT}`);
     if (frontendMode === 'vite-middleware') {
       console.log('[glondia] Frontend: Vite middleware (HMR) on the SAME port as the API');
@@ -467,25 +559,28 @@ async function boot() {
     console.log(`[glondia] Mailboxes: http://localhost:${PORT}/mailboxes`);
     console.log(`[glondia] DATABASE_URL: ${(process.env.DATABASE_URL || '(not set)').replace(/:[^:@]+@/, ':***@')}`);
 
-    prisma.$connect()
-      .then(() => console.log('[glondia] Database connection established.'))
-      .then(() => ensureUserColumns())
-      .then(() => ensureNotificationsTable())
-      .then(() => ensureClientProjectsTable())
-      .then(() => ensureDeploymentSubscriptionsTable())
-      .then(() => ensureServiceRequestsTable())
-      .then(() => ensureCrmEmailTables())
-      .then(() => ensureBuilderLifecycleTables())
-      .then(() => ensureProviderResourcesTable())
-      .then(() => ensureVpsTenancyBackfill())
-      .then(() => ensureTicketColumns())
-      .then(() => startBuilderWorkerIfEnabled())
-      .catch((err) => console.error('[glondia] Database connection FAILED:', err.message, '\n  Check that the persistent disk is mounted and DATABASE_URL is correct.'));
+    emailSyncScheduler = startEmailSyncScheduler();
+    console.log('[email-sync] Database-backed DNS synchronization enabled.');
+    domainSyncScheduler = startDomainSyncScheduler();
+    console.log('[domain-sync] Database-backed domain synchronization enabled.');
+    billingReconciliationScheduler = startBillingReconciliationScheduler();
+    console.log('[billing] Invoice and payment reconciliation enabled.');
+    vpsCatalogScheduler = startVpsCatalogScheduler();
+    vpsServiceSyncScheduler = startVpsServiceSyncScheduler();
+    console.log('[vps-sync] Database-backed catalog and service synchronization enabled.');
+    cloudStorageCatalogScheduler = startCloudStorageCatalogScheduler();
+    console.log('[cloud-storage] Database-backed catalog synchronization enabled.');
+    const hostingSyncIntervalMs = Math.max(60_000, Number(process.env.HOSTING_PROVIDER_SYNC_INTERVAL_MS || 5 * 60 * 1000));
+    hostingProviderSyncTimer = setInterval(() => {
+      hostingService.syncManagedRenderDeployments().catch((error) => {
+        console.warn('[hosting-sync] Scheduled provider sync failed:', error.message);
+      });
+    }, hostingSyncIntervalMs);
+    hostingProviderSyncTimer.unref?.();
+    console.log('[hosting-sync] Database-backed Render synchronization enabled.');
   });
 
   attachGracefulShutdown();
-  startDeploymentCleanupJob();
-  warmForexCache();
 }
 
 boot().catch((err) => {

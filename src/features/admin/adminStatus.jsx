@@ -47,23 +47,23 @@ function toneFor(value) {
 }
 
 const TONE_COLORS = {
-  success: { bg: 'var(--accent-soft)', fg: 'var(--accent)' },
-  warn:    { bg: '#fdf0d5', fg: '#9a6200' },
-  danger:  { bg: '#fde2e1', fg: '#c0392b' },
-  info:    { bg: 'var(--bg-deep)', fg: 'var(--text-muted)' },
+  success: { fg: 'var(--accent)' },
+  warn:    { fg: '#9a6200' },
+  danger:  { fg: '#c0392b' },
+  info:    { fg: 'var(--text-muted)' },
 };
 
 export function StatusPill({ value }) {
   if (!value) return <span className="muted">—</span>;
   const tone = toneFor(value);
-  const { bg, fg } = TONE_COLORS[tone];
+  const { fg } = TONE_COLORS[tone];
   return (
     <span
       style={{
-        background: bg,
+        background: 'transparent',
         color: fg,
-        padding: '2px 8px',
-        borderRadius: 999,
+        padding: 0,
+        borderRadius: 0,
         fontSize: 11.5,
         fontWeight: 600,
         whiteSpace: 'nowrap',

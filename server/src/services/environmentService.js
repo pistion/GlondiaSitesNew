@@ -1,10 +1,14 @@
 import crypto from 'node:crypto';
 import renderApiService from './renderApiService.js';
 import { mutateHostingStore, nowIso, redactEnvValue, readHostingStore } from './hostingStore.js';
+import { prisma } from './db.js';
 
 class EnvironmentService {
   async list(deploymentId) {
-    return (await this.listRaw(deploymentId)).map(publicEnvVar);
+    const deployment = await resolveDeployment(deploymentId);
+    const dbRows = await listTableRows(deployment);
+    if (dbRows.length > 0) return dbRows.map(publicEnvVar);
+    return (await this.listRaw(deployment.deploymentId)).map(publicEnvVar);
   }
 
   async listRaw(deploymentId) {
@@ -15,8 +19,11 @@ class EnvironmentService {
   async sync(deploymentId) {
     const deployment = await resolveDeployment(deploymentId);
     const rows = await this.listRaw(deployment.deploymentId);
-    const envVars = rows.map((item) => ({ key: item.key, value: readStoredValue(item) }));
+    const tableRows = await listTableRows(deployment);
+    const sourceRows = tableRows.length ? tableRows : rows;
+    const envVars = sourceRows.map((item) => ({ key: item.key, value: readStoredValue(item) }));
     await renderApiService.upsertEnvVars(deployment.renderServiceId, envVars);
+    await markTableRowsSynced(deployment);
     return mutateHostingStore((store) => {
       const nextRows = (store.env[deployment.deploymentId] || []).map((item) => ({
         ...item,
@@ -40,7 +47,7 @@ class EnvironmentService {
         renderSynced = true;
       } catch { /* store locally even if Render sync fails */ }
     }
-    return mutateHostingStore((store) => {
+    return mutateHostingStore(async (store) => {
       const rows = store.env[deployment.deploymentId] || [];
       const existing = rows.find((item) => item.key === envVar.key);
       const metadata = toMetadata(envVar, null);
@@ -49,6 +56,7 @@ class EnvironmentService {
       else rows.unshift(metadata);
       store.env[deployment.deploymentId] = rows;
       updateDeploymentEnv(store, deployment.deploymentId, rows);
+      await upsertTableRow(deployment, existing || metadata);
       return publicEnvVar(existing || metadata);
     });
   }
@@ -64,9 +72,10 @@ class EnvironmentService {
         await renderApiService.deleteEnvVar(deployment.renderServiceId, key);
       } catch { /* remove locally even if Render delete fails */ }
     }
-    return mutateHostingStore((store) => {
+    return mutateHostingStore(async (store) => {
       store.env[deployment.deploymentId] = (store.env[deployment.deploymentId] || []).filter((item) => item.key !== key);
       updateDeploymentEnv(store, deployment.deploymentId, store.env[deployment.deploymentId]);
+      await deleteTableRow(deployment, key);
       return { deleted: true, key };
     });
   }
@@ -98,6 +107,150 @@ function validateEnvVar(input = {}) {
     throw error;
   }
   return { key, value, environment: input.environment || 'production', secret: input.secret !== false };
+}
+
+async function listTableRows(deployment) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT
+         "id",
+         "hosting_service_id" AS "hostingServiceId",
+         "render_service_id" AS "renderServiceId",
+         "deployment_id" AS "deploymentId",
+         "organization_id" AS "organizationId",
+         "created_by_user_id" AS "createdByUserId",
+         "key",
+         "environment",
+         "encrypted",
+         "value_preview" AS "valuePreview",
+         "value_ciphertext" AS "valueCiphertext",
+         "value_plaintext" AS "valuePlaintext",
+         "render_synced" AS "renderSynced",
+         "requires_redeploy" AS "requiresRedeploy",
+         "created_at" AS "createdAt",
+         "updated_at" AS "updatedAt"
+       FROM "hosting_environment_variables"
+       WHERE "hosting_service_id" = ? OR "deployment_id" = ? OR "render_service_id" = ?
+       ORDER BY "updated_at" DESC`,
+      deployment.deploymentId,
+      deployment.deploymentId,
+      deployment.renderServiceId || '',
+    );
+    return Array.isArray(rows) ? rows.map(normalizeTableRow) : [];
+  } catch (error) {
+    if (!isMissingEnvTable(error)) console.error('[env] table list failed:', error.message);
+    return [];
+  }
+}
+
+async function upsertTableRow(deployment, item = {}) {
+  const id = item.id || `env_${crypto.randomUUID()}`;
+  const hostingServiceId = deployment.deploymentId;
+  const renderServiceId = deployment.renderServiceId || null;
+  const organizationId = deployment.organizationId || deployment.workspaceId || null;
+  const createdByUserId = deployment.createdByUserId || deployment.userId || null;
+  const environment = item.environment || 'production';
+  const updatedAt = nowIso();
+  const existing = await prisma.$queryRawUnsafe(
+    `SELECT "id" FROM "hosting_environment_variables"
+     WHERE "hosting_service_id" = ? AND "key" = ? AND "environment" = ?
+     LIMIT 1`,
+    hostingServiceId,
+    item.key,
+    environment,
+  ).catch((error) => {
+    if (!isMissingEnvTable(error)) throw error;
+    return [];
+  });
+  if (Array.isArray(existing) && existing[0]?.id) {
+    await prisma.$executeRawUnsafe(
+      `UPDATE "hosting_environment_variables"
+       SET "render_service_id" = ?, "deployment_id" = ?, "organization_id" = ?, "created_by_user_id" = ?,
+           "encrypted" = ?, "value_preview" = ?, "value_ciphertext" = ?, "value_plaintext" = ?,
+           "render_synced" = ?, "requires_redeploy" = ?, "updated_at" = ?
+       WHERE "id" = ?`,
+      renderServiceId,
+      deployment.deploymentId,
+      organizationId,
+      createdByUserId,
+      Boolean(item.encrypted),
+      item.valuePreview || '',
+      item.valueCiphertext || null,
+      item.valuePlaintext ?? null,
+      Boolean(item.renderSynced),
+      Boolean(item.requiresRedeploy),
+      updatedAt,
+      existing[0].id,
+    ).catch((error) => {
+      if (!isMissingEnvTable(error)) throw error;
+    });
+    return;
+  }
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "hosting_environment_variables" (
+       "id", "hosting_service_id", "render_service_id", "deployment_id", "organization_id", "created_by_user_id",
+       "key", "environment", "encrypted", "value_preview", "value_ciphertext", "value_plaintext",
+       "render_synced", "requires_redeploy", "created_at", "updated_at")
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id,
+    hostingServiceId,
+    renderServiceId,
+    deployment.deploymentId,
+    organizationId,
+    createdByUserId,
+    item.key,
+    environment,
+    Boolean(item.encrypted),
+    item.valuePreview || '',
+    item.valueCiphertext || null,
+    item.valuePlaintext ?? null,
+    Boolean(item.renderSynced),
+    Boolean(item.requiresRedeploy),
+    updatedAt,
+    updatedAt,
+  ).catch((error) => {
+    if (!isMissingEnvTable(error)) throw error;
+  });
+}
+
+async function deleteTableRow(deployment, key) {
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM "hosting_environment_variables"
+     WHERE ("hosting_service_id" = ? OR "deployment_id" = ? OR "render_service_id" = ?) AND "key" = ?`,
+    deployment.deploymentId,
+    deployment.deploymentId,
+    deployment.renderServiceId || '',
+    key,
+  ).catch((error) => {
+    if (!isMissingEnvTable(error)) throw error;
+  });
+}
+
+async function markTableRowsSynced(deployment) {
+  await prisma.$executeRawUnsafe(
+    `UPDATE "hosting_environment_variables"
+     SET "render_synced" = 1, "requires_redeploy" = 1, "updated_at" = ?
+     WHERE "hosting_service_id" = ? OR "deployment_id" = ? OR "render_service_id" = ?`,
+    nowIso(),
+    deployment.deploymentId,
+    deployment.deploymentId,
+    deployment.renderServiceId || '',
+  ).catch((error) => {
+    if (!isMissingEnvTable(error)) throw error;
+  });
+}
+
+function normalizeTableRow(row = {}) {
+  return {
+    ...row,
+    encrypted: Boolean(row.encrypted),
+    renderSynced: Boolean(row.renderSynced),
+    requiresRedeploy: Boolean(row.requiresRedeploy),
+  };
+}
+
+function isMissingEnvTable(error) {
+  return /hosting_environment_variables|no such table|does not exist/i.test(error?.message || '');
 }
 
 function toMetadata(envVar, renderResult) {

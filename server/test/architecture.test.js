@@ -32,6 +32,8 @@ const MUST_NOT_TOUCH_DB = [
   'services/adminService.js',
   'services/adminCustomerOversightService.js',
   'controllers/adminCustomerController.js',
+  'services/hostingRelationshipRepairService.js',
+  'controllers/adminHostingRepairController.js',
 ];
 
 for (const rel of MUST_NOT_TOUCH_DB) {
@@ -51,6 +53,8 @@ const REPOSITORIES = [
   'repositories/customer.repository.js',
   'repositories/adminUser.repository.js',
   'repositories/adminDashboard.repository.js',
+  'repositories/hostingRepair.repository.js',
+  'repositories/hosting.repository.js',
   'repositories/billing.repository.js',
   'repositories/operations.repository.js',
   'repositories/audit.repository.js',

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AUTH_CHANGED_EVENT, DATA_CHANGED_EVENT, apiRequest, getStoredAuth, mapApiProject } from './api';
+import { AUTH_CHANGED_EVENT, DATA_CHANGED_EVENT, getStoredAuth, listProjects } from './api';
 import { GD } from './data';
 
 export function useProjects() {
@@ -26,11 +26,11 @@ export function useProjects() {
     let cancelled = false;
     setState((current) => ({ ...current, loading: true, error: null }));
 
-    apiRequest('/projects')
+    listProjects()
       .then((projects) => {
         if (cancelled) return;
         setState({
-          projects: projects.map(mapApiProject),
+          projects,
           loading: false,
           source: 'api',
           error: null,

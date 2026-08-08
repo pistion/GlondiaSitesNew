@@ -12,6 +12,7 @@ import { promises as fsp, constants as fsConstants } from 'node:fs';
 import { prisma } from './db.js';
 import renderApiService from './renderApiService.js';
 import { getRuntimeConfig, hasRealValue } from '../glondia-engines/00-SHARED/runtimeConfig.js';
+import { getProviderCapabilities } from '../glondia-engines/01-HOSTING-DEPLOY-ENGINE/00-SHARED/hostingProviderResolver.js';
 
 async function canQuery(model) {
   try { await prisma[model].count(); return true; } catch { return false; }
@@ -28,6 +29,7 @@ async function dirWritable(dir) {
 
 export async function checkDeployReadiness() {
   const cfg = getRuntimeConfig();
+  const capabilities = getProviderCapabilities();
   const missing = [];
 
   const [databaseReady, billingReady, subscriptionReady, notificationReady] = await Promise.all([
@@ -64,6 +66,11 @@ export async function checkDeployReadiness() {
   const readyForGithubDeploy = Boolean(renderReady && githubImportReady && databaseReady && dataDirWritable);
 
   return {
+    providerMode: capabilities.mode,
+    uploadProvider: capabilities.uploadProvider,
+    domainProvider: capabilities.domainProvider,
+    uploadProviderReason: capabilities.uploadProviderReason,
+    providers: capabilities.providers,
     readyForZipDeploy,
     readyForGithubDeploy,
     databaseReady,

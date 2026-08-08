@@ -94,13 +94,30 @@ test('public settings and quote respond, quote hides cost and margin', async () 
   }
 });
 
+test('plan catalog is region-aware and curated for customer choices', async () => {
+  const res = await api('/plans?type=vc2&region=syd&curated=true');
+  assert.equal(res.status, 200);
+  const plans = await res.json();
+  assert.equal(plans.length <= 3, true);
+  assert.equal(plans.every((p) => p.type === 'vc2' && p.locations.includes('syd')), true);
+  assert.equal(plans.every((p) => ['starter', 'balanced', 'power', 'option'].includes(p.recommendation)), true);
+
+  const unavailable = await api('/quote', {
+    method: 'POST',
+    body: { region: 'syd', plan: 'vhp-2c-4gb-amd', osId: 2284 },
+  });
+  assert.equal(unavailable.status, 400);
+  const body = await unavailable.json();
+  assert.match(body.error.message, /not available in region "syd"/);
+});
+
 let serviceId;
 
 test('create returns a customer DTO without internal fields', async () => {
   const res = await api('/services', {
     method: 'POST',
     user: 'tenant-a',
-    body: { plan: 'vc2-1c-1gb', region: 'syd', osId: 2284, label: 'itest-a' },
+    body: { plan: 'vc2-1c-1gb', region: 'syd', osId: 2284, label: 'itest-a', backups: true },
   });
   assert.equal(res.status, 201);
   const dto = await res.json();
@@ -108,6 +125,7 @@ test('create returns a customer DTO without internal fields', async () => {
   assert.ok(dto.id);
   assert.equal(dto.totalPriceCents, 780);
   assert.equal(dto.testMode, true);
+  assert.equal(dto.backupsEnabled, true);
   for (const field of [
     'organizationId', 'createdByUserId', 'providerInstanceId', 'checkoutOrderId',
     'monthlyCostCents', 'markupPercent', 'markupAmountCents',
@@ -153,12 +171,80 @@ test('credentials come only from the protected reveal endpoint', async () => {
   assert.equal('connectionPassword' in detail, false);
 });
 
+test('service summary returns toolbar state and cached usage fields', async () => {
+  const res = await api(`/services/${serviceId}/summary`, { user: 'tenant-a' });
+  assert.equal(res.status, 200);
+  const summary = await res.json();
+  assert.equal(summary.service.id, serviceId);
+  assert.equal(summary.service.backupsEnabled, true);
+  assert.equal(typeof summary.service.bandwidthUsedGb, 'number');
+  assert.equal(summary.toolbar.canOpenConsole, false);
+  assert.equal(typeof summary.toolbar.canReboot, 'boolean');
+  assert.equal('providerInstanceId' in summary.service, false);
+});
+
 test('ssh keys and snapshots list only owned resources', async () => {
   assert.deepEqual(await (await api('/ssh-keys', { user: 'tenant-a' })).json(), []);
   assert.deepEqual(await (await api('/snapshots', { user: 'tenant-a' })).json(), []);
   // Deleting an unowned/unknown snapshot is a 404, not a provider call.
   const res = await api('/snapshots/some-foreign-snapshot', { method: 'DELETE', user: 'tenant-a' });
   assert.equal(res.status, 404);
+});
+
+test('owner service tabs have functional backend routes', async () => {
+  const settings = await api(`/services/${serviceId}/settings`, {
+    method: 'PATCH',
+    user: 'tenant-a',
+    body: { label: 'itest-a-renamed', hostname: 'itest-a-renamed', tags: ['org:tenant-a', 'role:web'] },
+  });
+  assert.equal(settings.status, 200);
+  const updated = await settings.json();
+  assert.equal(updated.label, 'itest-a-renamed');
+  assert.deepEqual(updated.tags, ['org:tenant-a', 'role:web']);
+
+  const bandwidth = await api(`/services/${serviceId}/bandwidth`, { user: 'tenant-a' });
+  assert.equal(bandwidth.status, 200);
+
+  const backup = await api(`/services/${serviceId}/backup-schedule`, {
+    method: 'POST',
+    user: 'tenant-a',
+    body: { type: 'daily', enabled: true },
+  });
+  assert.equal(backup.status, 200);
+  assert.equal((await backup.json()).enabled, true);
+
+  const snapshot = await api(`/services/${serviceId}/snapshots`, {
+    method: 'POST',
+    user: 'tenant-a',
+    body: { description: 'integration snapshot' },
+  });
+  assert.equal(snapshot.status, 201);
+  const snap = await snapshot.json();
+  assert.ok(snap.id);
+
+  const serviceSnapshots = await api(`/services/${serviceId}/snapshots`, { user: 'tenant-a' });
+  assert.equal(serviceSnapshots.status, 200);
+  assert.equal((await serviceSnapshots.json()).some((item) => item.id === snap.id), true);
+
+  const restore = await api(`/services/${serviceId}/restore`, {
+    method: 'POST',
+    user: 'tenant-a',
+    body: { snapshotId: snap.id },
+  });
+  assert.equal(restore.status, 200);
+
+  const createKey = await api('/ssh-keys', {
+    method: 'POST',
+    user: 'tenant-a',
+    body: { name: 'integration-key', publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest integration@example' },
+  });
+  assert.equal(createKey.status, 201);
+  const key = await createKey.json();
+  assert.ok(key.id);
+
+  const keys = await api('/ssh-keys', { user: 'tenant-a' });
+  assert.equal(keys.status, 200);
+  assert.equal((await keys.json()).some((item) => item.id === key.id), true);
 });
 
 test('owner lifecycle works and destroy removes the service from the list', async () => {

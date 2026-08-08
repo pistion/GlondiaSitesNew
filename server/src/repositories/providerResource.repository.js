@@ -77,6 +77,13 @@ export async function listOwnedResources(organizationId, resourceType, provider 
   });
 }
 
+export async function listOwnedServiceResources(organizationId, serviceId, resourceType, provider = 'vultr') {
+  return prisma.providerResource.findMany({
+    where: { organizationId, serviceId, resourceType, provider, deletedAt: null },
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
 /** Look up the ownership row for a provider resource id (regardless of owner). */
 export async function findByProviderResourceId(resourceType, providerResourceId, provider = 'vultr') {
   return prisma.providerResource.findUnique({

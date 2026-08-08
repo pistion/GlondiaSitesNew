@@ -14,6 +14,7 @@ import {
 } from './api/notifications.js';
 import { isFeatureEnabled } from './app/features.js';
 import { DashboardSearch } from './dashboard-search';
+import { SERVICE_SANDBOX_EVENT } from './features/sandbox/sandboxState.js';
 
 const { useState } = React;
 
@@ -132,9 +133,12 @@ export const DASH_NAV = [
     items: [
       { key: "overview",     label: "Overview",       icon: "LayoutDashboard", route: { view: "overview" } },
       { key: "hosting",      label: "Hosting",        icon: "Server",          route: { view: "hosting-list" } },
+      { key: "cloud-storage", label: "Cloud Storage",  icon: "Database",        route: { view: "cloud-storage" } },
       { key: "vps-hosting",  label: "VPS Services",   icon: "Cpu",             route: { view: "vps-hosting" }, feature: "vps" },
       { key: "buy",          label: "Buy a domain",   icon: "Cart",            route: { view: "domains-buy" },  feature: "domains", domainRoot: true },
       { key: "domains",      label: "My domains",     icon: "Globe",           route: { view: "domains-mine" }, feature: "domains", indent: true, navChild: true },
+      { key: "email",        label: "Email",          icon: "Mail",            route: { view: "email" }, feature: "email", domainRoot: true },
+      { key: "email-mailboxes", label: "My emails",      icon: "Inbox",          route: { view: "email-mailboxes" }, feature: "email", indent: true, navChild: true },
       { key: "builder",      label: "Site builder",   icon: "Layers",          route: { view: "builder-gallery" } },
     ],
   },
@@ -143,13 +147,20 @@ export const DASH_NAV = [
     items: [
       { key: "analytics",  label: "Analytics",      icon: "ChartBar",        route: { view: "analytics" }, feature: "analytics" },
       { key: "activity",   label: "Activity",       icon: "Activity",        route: { view: "activity" }, feature: "activity" },
+      { key: "sandbox",    label: "Service Sandbox", icon: "Code",           route: { view: "sandbox" } },
     ],
   },
   {
     title: "Account",
     items: [
       { key: "billing",    label: "Billing",        icon: "CreditCard",      route: { view: "billing" } },
-      { key: "email",      label: "Email",          icon: "Mail",            route: { view: "email" }, feature: "email" },
+      {
+        key: "invite",
+        label: "Invite a friend",
+        icon: "Send",
+        href: `mailto:?subject=${encodeURIComponent("Join me on Glondia")}&body=${encodeURIComponent("I use Glondia for hosting, domains, and sites - check it out: https://glondia.co")}`,
+      },
+      { key: "support",    label: "Contact support", icon: "MessageSquare",   route: { view: "support" }, supportBadge: true },
       { key: "settings",   label: "Settings",       icon: "Settings",        route: { view: "settings" }, feature: "settings" },
     ],
   },
@@ -203,11 +214,18 @@ export function DashSidebar({ active, navigate, mobileOpen = false, onClose }) {
               return (
                 <a key={item.key}
                    className={`dash-side-link ${isActive ? "active" : ""} ${item.domainRoot ? "domain-root" : ""} ${item.navChild ? "nav-child" : ""}`}
-                   href="#"
+                   href={item.href || "#"}
+                   aria-current={isActive ? "page" : undefined}
+                   title={item.label}
                    style={item.indent ? { paddingLeft: 32 } : undefined}
-                   onClick={(e) => { e.preventDefault(); navigate(item.route); }}>
+                   onClick={(e) => {
+                     if (!item.route) return;
+                     e.preventDefault();
+                     navigate(item.route);
+                   }}>
                   <Icon size={item.indent ? 13 : 16} />
                   <span style={item.indent ? { fontSize: 13 } : undefined}>{item.label}</span>
+                  {item.supportBadge && supportUnread > 0 && <span className="support-unread-badge">{supportUnread > 9 ? '9+' : supportUnread}</span>}
                 </a>
               );
             })}
@@ -216,23 +234,8 @@ export function DashSidebar({ active, navigate, mobileOpen = false, onClose }) {
       </nav>
       <div className="dash-side-foot">
         <div className="side-utils">
-          <a href="#" className="side-util-link" onClick={(e) => { e.preventDefault(); navigate({ view: "activity" }); }}>
-            <ICN.Newspaper size={15} /> Changelog
-          </a>
-          <a
-            className="side-util-link"
-            href={`mailto:?subject=${encodeURIComponent("Join me on Glondia")}&body=${encodeURIComponent("I use Glondia for hosting, domains, and sites — check it out: https://glondia.co")}`}
-          >
-            <ICN.Send size={15} /> Invite a friend
-          </a>
-          <a href="#" className={`side-util-link ${active === 'support' ? 'active' : ''}`}
-             onClick={(e) => { e.preventDefault(); navigate({ view: "support" }); }}>
-            <ICN.MessageSquare size={15} /> Contact support
-            {supportUnread > 0 && <span className="support-unread-badge">{supportUnread > 9 ? '9+' : supportUnread}</span>}
-          </a>
-          <div className="side-utils-sep" />
           <a href="https://status.render.com" target="_blank" rel="noopener noreferrer" className="side-util-link">
-            <ICN.Activity size={15} /> Glondia Status
+            <ICN.Activity size={15} /> Platform status
           </a>
         </div>
         <div className="help">
@@ -274,16 +277,23 @@ function relTime(value) {
 // Admin work happens in the separate /dashboard app (not this client shell).
 function routeForAction(url) {
   const u = String(url || '');
-  if (u.includes('#support') || u.includes('/support')) return { view: 'support' };
-  if (u.includes('#tickets')) {
-    window.location.href = '/dashboard#tickets';
+  const lower = u.toLowerCase();
+  const isAdmin = getStoredAuth()?.user?.role === 'admin';
+
+  if (!isAdmin) return null;
+
+  if (lower.startsWith('/admin') || lower.startsWith('/api/admin') || lower.includes('admin-dashboard')) {
+    window.location.href = '/admin';
     return null;
   }
-  if (u.includes('/admin') || u.includes('/dashboard')) {
-    window.location.href = '/dashboard';
+
+  if (u.includes('#support') || u.includes('/support')) return { view: 'support' };
+  if (u.includes('#tickets')) {
+    window.location.href = '/admin#tickets';
     return null;
   }
   if (u.includes('billing')) return { view: 'billing' };
+  if (u.includes('hosting')) return { view: 'hosting' };
   return null;
 }
 
@@ -312,7 +322,12 @@ function NotificationBell({ navigate }) {
     const t = setInterval(refreshCount, 60000);
     const onAuth = () => refreshCount();
     window.addEventListener(AUTH_CHANGED_EVENT, onAuth);
-    return () => { clearInterval(t); window.removeEventListener(AUTH_CHANGED_EVENT, onAuth); };
+    window.addEventListener(SERVICE_SANDBOX_EVENT, onAuth);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener(AUTH_CHANGED_EVENT, onAuth);
+      window.removeEventListener(SERVICE_SANDBOX_EVENT, onAuth);
+    };
   }, [refreshCount]);
 
   const toggle = () => {
@@ -551,6 +566,12 @@ function AuthMenu({ navigate }) {
             </div>
           </div>
           <div className="am-list">
+            {auth.user?.role === 'admin' && (
+              <a className="am-item" role="menuitem" href="/admin">
+                <ICN.ShieldCheck size={15} />
+                Admin dashboard
+              </a>
+            )}
             <button
               type="button"
               className="am-item"
@@ -652,7 +673,83 @@ export function Empty({ icon = "Box", title, body, action }) {
 }
 
 export function Tabs({ value, onChange, options }) {
-  return <div className="tabs">{options.map((opt) => { const v = typeof opt === "string" ? opt : opt.value; const label = typeof opt === "string" ? opt : opt.label; return <button key={v} className={v === value ? "active" : ""} onClick={() => onChange(v)}>{label}</button>; })}</div>;
+  const wrapRef = React.useRef(null);
+  const buttonRefs = React.useRef({});
+  const [indicator, setIndicator] = React.useState({ left: 3, width: 0, top: 3, height: 0, ready: false });
+  const optionKey = options
+    .map((option) => typeof option === "string" ? option : option.value)
+    .join("|");
+
+  React.useLayoutEffect(() => {
+    const wrap = wrapRef.current;
+    const btn = buttonRefs.current[value];
+    if (!wrap || !btn) return;
+    const updateIndicator = () => {
+      const wrapBox = wrap.getBoundingClientRect();
+      const btnBox = btn.getBoundingClientRect();
+      const next = {
+        left: Math.round((btnBox.left - wrapBox.left) * 100) / 100,
+        top: Math.round((btnBox.top - wrapBox.top) * 100) / 100,
+        width: Math.round(btnBox.width * 100) / 100,
+        height: Math.round(btnBox.height * 100) / 100,
+        ready: true,
+      };
+      setIndicator((current) =>
+        current.left === next.left &&
+        current.top === next.top &&
+        current.width === next.width &&
+        current.height === next.height &&
+        current.ready === next.ready
+          ? current
+          : next,
+      );
+    };
+    updateIndicator();
+    const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateIndicator) : null;
+    resizeObserver?.observe(wrap);
+    resizeObserver?.observe(btn);
+    window.addEventListener("resize", updateIndicator);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateIndicator);
+    };
+  }, [value, optionKey]);
+
+  return (
+    <div className="tabs" ref={wrapRef}>
+      <span
+        className="tabs-active-indicator"
+        aria-hidden="true"
+        style={{
+          transform: `translate(${indicator.left}px, ${indicator.top}px)`,
+          width: indicator.width,
+          height: indicator.height,
+          opacity: indicator.ready ? 1 : 0,
+        }}
+      />
+      {options.map((opt) => {
+        const v = typeof opt === "string" ? opt : opt.value;
+        const label = typeof opt === "string" ? opt : opt.label;
+        const Icon = typeof opt === "string" ? null : ICN[opt.icon];
+        const iconOnly = Boolean(typeof opt !== "string" && opt.iconOnly);
+        return (
+          <button
+            type="button"
+            key={v}
+            ref={(node) => { if (node) buttonRefs.current[v] = node; }}
+            className={`${v === value ? "active" : ""}${Icon ? " has-icon" : ""}${iconOnly ? " icon-only" : ""}`}
+            onClick={() => onChange(v)}
+            title={iconOnly ? label : undefined}
+            aria-label={iconOnly ? label : undefined}
+            data-tooltip={iconOnly ? label : undefined}
+          >
+            {Icon && <Icon size={15} aria-hidden="true" />}
+            {!iconOnly && <span>{label}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function Stat({ k, v, d }) { return <div className="card stat-card"><div className="k">{k}</div><div className="v">{v}</div><div className="d">{d}</div></div>; }

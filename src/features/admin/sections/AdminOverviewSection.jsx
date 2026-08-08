@@ -36,17 +36,14 @@ export function AdminOverviewSection({ overview, deployments, orders, receipts, 
   const activeDep = deployments.filter((d) => d.status === 'live' || d.status === 'active').length;
   const suspendedDep = deployments.filter((d) => d.status === 'suspended' || d.status === 'overdue_suspended').length;
   const failedDep = deployments.filter((d) => d.status === 'failed').length;
-  const freeDep = deployments.filter((d) => d.billingTierId === 'free' || d.renderPlan === 'free').length;
+  const freeDep = deployments.filter((d) => d.renderPlan === 'free').length;
   const paidDep = deployments.filter((d) => d.paymentStatus === 'paid').length;
-  const promoDep = deployments.filter((d) => d.billingTierId === 'promo_50').length;
 
   const pendingReceipts = receipts.filter((r) => r.status === 'pending').length;
   const paidRevCents = orders.filter((o) => o.status === 'paid').reduce((s, o) => s + (o.totalAmountCents || 0), 0);
   const pendingBills = orders.filter((o) => o.status === 'pending' || o.status === 'payment_uploaded').length;
   const expiredBills = orders.filter((o) => o.status === 'expired' || o.status === 'payment_expired').length;
 
-  const promoUsers = users.filter((u) => u.promoClaimedAt).length;
-  const promoEligible = users.filter((u) => u.promoEligible && !u.promoClaimedAt).length;
 
   const depByPayment = deployments.reduce((acc, d) => {
     const k = d.paymentStatus || 'unknown';
@@ -72,7 +69,6 @@ export function AdminOverviewSection({ overview, deployments, orders, receipts, 
         <StatCard label="Failed hosting" value={failedDep} />
         <StatCard label="Free hosting" value={freeDep} />
         <StatCard label="Paid hosting" value={paidDep} />
-        <StatCard label="Promo deployments" value={promoDep} />
         <StatCard label="Pending receipts" value={pendingReceipts} />
         <StatCard label="Paid revenue" value={ov.revenue?.paidDisplay || money(paidRevCents)} />
         <StatCard label="Pending bills" value={pendingBills} />
@@ -97,27 +93,6 @@ export function AdminOverviewSection({ overview, deployments, orders, receipts, 
               <strong>{v}</strong>
             </div>
           ))}
-        </SummaryBlock>
-
-        <SummaryBlock title="Promo usage">
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="muted">Limit</span><strong>{ov.promo?.limit ?? 20}</strong>
-          </div>
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="muted">Claimed</span><strong>{ov.promo?.used ?? promoUsers}</strong>
-          </div>
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="muted">Remaining</span><strong>{ov.promo?.remaining ?? (20 - promoUsers)}</strong>
-          </div>
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="muted">Eligible (unclaimed)</span><strong>{promoEligible}</strong>
-          </div>
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="muted">Paid K50 (promo)</span><strong>{ov.promo?.paidPromo ?? 0}</strong>
-          </div>
-          <div className="row" style={{ justifyContent: 'space-between', padding: '3px 0' }}>
-            <span className="muted">Paid K200 (standard)</span><strong>{ov.promo?.paidStandard ?? 0}</strong>
-          </div>
         </SummaryBlock>
 
         {ov.platformMargin && (

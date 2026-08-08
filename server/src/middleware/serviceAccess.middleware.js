@@ -66,6 +66,52 @@ export function requireServiceAccess(serviceType, getServiceId) {
   };
 }
 
+/**
+ * Transitional ServiceAccess guard (Phase 6 migration).
+ *
+ * Enforces access when a ServiceAccess row exists for the service, but falls
+ * THROUGH when none exists yet (SERVICE_NOT_FOUND) so legacy records that have
+ * not been backfilled are not locked out. Ownership is still enforced upstream
+ * (e.g. deploymentOwnership). Once backfill is complete and every service has an
+ * access row, callers should switch to `requireServiceAccess`, which denies on a
+ * missing row. Active denials (blocked / suspended / review / billing / expired)
+ * are always enforced.
+ */
+export function requireServiceAccessOrLegacy(serviceType, getServiceId) {
+  return async function serviceAccessOrLegacyMiddleware(req, res, next) {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ error: { message: 'Authentication required.', code: 'UNAUTHENTICATED' } });
+
+      const serviceId = typeof getServiceId === 'function' ? getServiceId(req) : getServiceId;
+      if (!serviceId) return next();
+
+      const isAdmin = req.user?.role === 'admin';
+      const result = await checkServiceAccess(userId, serviceType, serviceId, { adminBypass: isAdmin });
+
+      if (result.allowed) {
+        req.serviceAccess = result.row;
+        return next();
+      }
+      // No access row yet — transitional pass-through (ownership enforced upstream).
+      if (result.code === 'SERVICE_NOT_FOUND') return next();
+
+      if (req.securityContext) {
+        const tag = result.reason === 'owner_mismatch'
+          ? 'service.owner_mismatch'
+          : result.reason === 'admin_blocked'
+          ? 'service.disabled_access_attempt'
+          : 'service.access_denied';
+        req.securityContext.watchdogTags.push(tag);
+        req.securityContext.riskScore += result.reason === 'owner_mismatch' ? 5 : 2;
+      }
+      return res.status(403).json({ error: { message: friendlyMessage(result.code), code: result.code } });
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
 function friendlyMessage(code) {
   switch (code) {
     case 'SERVICE_NOT_FOUND':       return 'Service access record not found.';

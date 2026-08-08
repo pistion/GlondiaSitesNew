@@ -8,6 +8,7 @@
  */
 
 import express from 'express';
+import authMiddleware from '../middleware/authMiddleware.js';
 import { providerApiGuard } from '../glondia-engines/01-HOSTING-DEPLOY-ENGINE/services/providerApiGuard.service.js';
 import spaceshipController from '../controllers/provider-spaceship.controller.js';
 
@@ -18,30 +19,30 @@ router.post('/availability', providerApiGuard, spaceshipController.checkAvailabi
 // Back-compat alias used by older clients.
 router.post('/available', providerApiGuard, spaceshipController.checkAvailability);
 
-router.get('/domains', providerApiGuard, spaceshipController.listDomains);
-router.get('/domains/:domain', providerApiGuard, spaceshipController.getDomain);
-router.post('/domains/:domain/register', providerApiGuard, spaceshipController.registerDomain);
+router.get('/domains', authMiddleware, spaceshipController.listDomains);
+router.get('/domains/:domain', authMiddleware, spaceshipController.getDomain);
+router.post('/domains/:domain/register', authMiddleware, spaceshipController.registerDomain);
 // Back-compat: POST /domains with body.hostname | body.domain
-router.post('/domains', providerApiGuard, spaceshipController.registerDomainFromBody);
-router.post('/domains/:domain/renew', providerApiGuard, spaceshipController.renewDomain);
-router.put('/domains/:domain/nameservers', providerApiGuard, spaceshipController.updateNameservers);
-router.put('/domains/:domain/auto-renew', providerApiGuard, spaceshipController.updateAutoRenew);
+router.post('/domains', authMiddleware, spaceshipController.registerDomainFromBody);
+router.post('/domains/:domain/renew', authMiddleware, spaceshipController.renewDomain);
+router.put('/domains/:domain/nameservers', authMiddleware, spaceshipController.updateNameservers);
+router.put('/domains/:domain/auto-renew', authMiddleware, spaceshipController.updateAutoRenew);
 // Back-compat alias (no hyphen).
-router.put('/domains/:domain/autorenew', providerApiGuard, spaceshipController.updateAutoRenew);
+router.put('/domains/:domain/autorenew', authMiddleware, spaceshipController.updateAutoRenew);
 
-router.put('/contacts', providerApiGuard, spaceshipController.saveContact);
+router.put('/contacts', authMiddleware, spaceshipController.saveContact);
 // Back-compat: older clients POST contacts.
-router.post('/contacts', providerApiGuard, spaceshipController.saveContact);
-router.get('/contacts', providerApiGuard, spaceshipController.listContacts);
+router.post('/contacts', authMiddleware, spaceshipController.saveContact);
+router.get('/contacts', authMiddleware, spaceshipController.listContacts);
 
-router.get('/async-operations/:operationId', providerApiGuard, spaceshipController.getOperation);
+router.get('/async-operations/:operationId', authMiddleware, spaceshipController.getOperation);
 // Back-compat alias.
-router.get('/operations/:operationId', providerApiGuard, spaceshipController.getOperation);
+router.get('/operations/:operationId', authMiddleware, spaceshipController.getOperation);
 
-router.get('/dns/:domain/records', providerApiGuard, spaceshipController.listDnsRecords);
-router.put('/dns/:domain/records', providerApiGuard, spaceshipController.saveDnsRecords);
+router.get('/dns/:domain/records', authMiddleware, spaceshipController.listDnsRecords);
+router.put('/dns/:domain/records', authMiddleware, spaceshipController.saveDnsRecords);
 // Back-compat pull/push helpers used by the dashboard DNS tools.
-router.post('/domains/:domain/dns/pull', providerApiGuard, spaceshipController.pullDnsRecords);
-router.post('/domains/:domain/dns/push', providerApiGuard, spaceshipController.pushDnsRecords);
+router.post('/domains/:domain/dns/pull', authMiddleware, spaceshipController.pullDnsRecords);
+router.post('/domains/:domain/dns/push', authMiddleware, spaceshipController.pushDnsRecords);
 
 export default router;

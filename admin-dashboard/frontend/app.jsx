@@ -322,6 +322,12 @@ function App() {
       case "vps":
         body = <VpsView />;
         break;
+      case "email-services":
+        body = <EmailServicesView />;
+        break;
+      case "security-data":
+        body = <SecurityDataView />;
+        break;
       case "billing":
         body = <BillingView />;
         break;

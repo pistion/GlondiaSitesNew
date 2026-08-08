@@ -10,6 +10,7 @@ import {
   validateAnswerSheet,
   validatePlan,
 } from '../builder/builderValidationService.js';
+import { createProject as createClientProject, getProject as getClientProject } from './projectService.js';
 
 const IDEMPOTENCY_MAX = 160;
 
@@ -26,6 +27,20 @@ export async function createProject(user, body = {}) {
   let templatePin = null;
   if (data.sourceType === 'template') {
     templatePin = await pinTemplate(data.templateId);
+  }
+  if (data.clientProjectId) {
+    await getClientProject({ projectId: data.clientProjectId, userId: user.id });
+  } else {
+    const parent = await createClientProject({
+      userId: user.id,
+      input: {
+        name: String(data.name || data.templateId || 'New website').trim(),
+        serviceType: 'website',
+        status: 'draft',
+        source: 'site_builder',
+      },
+    });
+    data.clientProjectId = parent.id;
   }
   return repo.createProject({ user, data, templatePin });
 }

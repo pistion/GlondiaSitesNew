@@ -35,9 +35,9 @@ export async function streamDeploymentLogs(req, res) {
 
   const finish = (reason = 'done') => {
     if (finished) return;
-    finished = true;
     clearInterval(timer);
     emit('done', { reason });
+    finished = true;
     res.end();
   };
 
@@ -55,7 +55,13 @@ export async function streamDeploymentLogs(req, res) {
     // Flush existing Glondia internal events (reverse so oldest is first)
     const stored = (store.logs[deploymentId] || []).slice().reverse();
     for (const log of stored) {
-      emit('log', { id: log.id, message: log.message, level: log.level || 'info', timestamp: log.timestamp || log.createdAt, source: 'glondia' });
+      emit('log', {
+        id: log.id, message: log.message, level: log.level || 'info',
+        timestamp: log.timestamp || log.createdAt,
+        source: log.details?.source || 'glondia',
+        stage: log.details?.stage,
+        details: log.details,
+      });
     }
 
     // Emit current status
@@ -66,7 +72,7 @@ export async function streamDeploymentLogs(req, res) {
     const poll = async () => {
       if (finished) return;
       try {
-        const s = await readHostingStore();
+        let s = await readHostingStore();
         let fresh = (s.deployments || []).find((d) => d.deploymentId === deploymentId || d.id === deploymentId);
         if (!fresh) return finish('not_found');
 
@@ -75,6 +81,7 @@ export async function streamDeploymentLogs(req, res) {
         if (activeStates.has(fresh.status) && fresh.renderServiceId && !String(fresh.renderServiceId).includes('_pending')) {
           try {
             fresh = await deploymentStatusService.refreshDeployment(fresh) || fresh;
+            s = await readHostingStore();
           } catch { /* continue with stored status if refresh fails */ }
         }
 
@@ -85,7 +92,13 @@ export async function streamDeploymentLogs(req, res) {
         const seenGlondiaCount = stored.length;
         const newGlondia = freshLogs.slice(seenGlondiaCount);
         for (const log of newGlondia) {
-          emit('log', { id: log.id, message: log.message, level: log.level || 'info', timestamp: log.timestamp || log.createdAt, source: 'glondia' });
+          emit('log', {
+            id: log.id, message: log.message, level: log.level || 'info',
+            timestamp: log.timestamp || log.createdAt,
+            source: log.details?.source || 'glondia',
+            stage: log.details?.stage,
+            details: log.details,
+          });
           stored.push(log);
         }
 

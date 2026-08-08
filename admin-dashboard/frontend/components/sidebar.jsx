@@ -3,11 +3,13 @@ function Sidebar({ view, setView, counts, settings, isOpen, onClose, layer, onLa
 
   const mainItems = [
     { id: "dashboard",   label: "Overview",      Icon: I.Home },
-    { id: "customers",   label: "Customers",     Icon: I.Users,         count: counts.customers },
+    { id: "customers",   label: "Clients",       Icon: I.Users,         count: counts.customers },
     { id: "hosting",     label: "Hosting",       Icon: I.Server },
     { id: "deployments", label: "Deployments",   Icon: I.Activity,      count: counts.deployments },
-    { id: "domains",     label: "Domains",       Icon: I.Globe },
-    { id: "vps",         label: "VPS Hosting",   Icon: I.Database },
+    { id: "vps",         label: "VPS",           Icon: I.Database },
+    { id: "domains",     label: "Domain Names",  Icon: I.Globe },
+    { id: "email-services", label: "Emails",     Icon: I.Mail },
+    { id: "security-data", label: "Security Data", Icon: I.AlertTriangle },
     { id: "billing",     label: "Billing",       Icon: I.CreditCard,    count: counts.orders },
     { id: "receipts",    label: "Receipts",      Icon: I.File,          count: counts.receipts },
     { id: "service-access", label: "Service Access", Icon: I.Check },

@@ -5,7 +5,7 @@ import { listHostingSecretFiles, upsertHostingSecretFiles } from '../../api';
 import { normalizeList } from './shared';
 import { Notice } from './SectionShell';
 
-export default function SecretFilesSection({ deploymentId }) {
+export default function SecretFilesSection({ deploymentId, onNeedsRedeploy }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -20,7 +20,7 @@ export default function SecretFilesSection({ deploymentId }) {
       .catch((error) => setErr(error.message || 'Could not load secret files.'))
       .finally(() => setLoading(false));
   };
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
 
   const addRow = () => setFiles((current) => [...current, { id: `new_${Date.now()}`, name: '', value: '' }]);
   const removeRow = (index) => setFiles((current) => current.filter((_, i) => i !== index));
@@ -30,6 +30,7 @@ export default function SecretFilesSection({ deploymentId }) {
     try {
       await upsertHostingSecretFiles(deploymentId, files.filter((file) => file.name.trim()).map((file) => ({ name: file.name, content: file.value })));
       setMsg('Secret files saved.');
+      onNeedsRedeploy?.('Secret files');
       load();
     } catch (error) { setErr(error.message || 'Save failed.'); }
     finally { setSaving(false); }

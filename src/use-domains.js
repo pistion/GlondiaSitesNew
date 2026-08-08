@@ -5,17 +5,19 @@ import {
   apiRequest,
   getStoredAuth,
   listSslCertificates,
-  listRegisteredDomains,
+  listCustomerDomainDnsRecords,
+  listCustomerDomains,
   getRegistrarSettings,
   mapApiDnsRecord,
   mapApiDomain,
-  listDnsRecords,
 } from './api';
 import { isLiveMode } from './app/config.js';
+import { getActiveServiceSandbox } from './features/sandbox/sandboxState.js';
+import { sandboxDomainDnsRecords, sandboxDomains } from './features/sandbox/sandboxFixtures.js';
 
 /**
  * Load domains for the dashboard.
- * - Live mode: registrar inventory only (never GD mock domains).
+ * - Live mode: customer domain ledger only (never provider account inventory).
  * - Demo mode: local workspace store; empty if none.
  */
 export function useDomains() {
@@ -33,6 +35,19 @@ export function useDomains() {
 
     async function load() {
       setState((current) => ({ ...current, loading: true, error: null }));
+      const sandbox = getActiveServiceSandbox();
+      if (sandbox?.service === 'domains-mine' || sandbox?.service === 'domains-buy') {
+        if (!cancelled) {
+          setState({
+            domains: sandboxDomains().map(mapApiDomain),
+            loading: false,
+            source: 'sandbox',
+            error: null,
+            providerConfigured: true,
+          });
+        }
+        return;
+      }
 
       if (isLiveMode()) {
         try {
@@ -44,26 +59,13 @@ export function useDomains() {
             providerConfigured = false;
           }
 
-          if (providerConfigured === false) {
-            if (!cancelled) {
-              setState({
-                domains: [],
-                loading: false,
-                source: 'registrar',
-                error: null,
-                providerConfigured: false,
-              });
-            }
-            return;
-          }
-
-          const result = await listRegisteredDomains(0, 100);
+          const result = await listCustomerDomains();
           const items = Array.isArray(result?.items) ? result.items : (Array.isArray(result) ? result : []);
           if (!cancelled) {
             setState({
               domains: items.map(mapApiDomain),
               loading: false,
-              source: 'registrar',
+              source: 'customer-ledger',
               error: null,
               providerConfigured: providerConfigured !== false,
             });
@@ -74,7 +76,7 @@ export function useDomains() {
             setState({
               domains: [],
               loading: false,
-              source: 'registrar',
+              source: 'customer-ledger',
               error: error.message || 'Could not load domains.',
               providerConfigured: null,
             });
@@ -153,27 +155,39 @@ export function useDnsRecords(domainParam) {
       }
 
       setState((current) => ({ ...current, loading: true, error: null }));
+      const sandbox = getActiveServiceSandbox();
+      if (sandbox?.service === 'domains-mine' || sandbox?.service === 'domains-buy') {
+        if (!cancelled) {
+          setState({
+            records: sandboxDomainDnsRecords(domainParam).map(mapApiDnsRecord),
+            loading: false,
+            source: 'sandbox',
+            error: null,
+          });
+        }
+        return;
+      }
 
       if (isLiveMode()) {
-        if (providerConfigured === false) {
-          if (!cancelled) {
-            setState({
-              records: [],
-              loading: false,
-              source: 'registrar',
-              error: null,
-            });
-          }
-          return;
-        }
         try {
-          const name = domain?.name || domainParam;
-          const records = await listDnsRecords(name);
+          if (!domain?.id) {
+            if (!cancelled) {
+              setState({
+                records: [],
+                loading: false,
+                source: 'customer-ledger',
+                error: 'Domain is not assigned to this account.',
+              });
+            }
+            return;
+          }
+
+          const records = await listCustomerDomainDnsRecords(domain.id);
           if (!cancelled) {
             setState({
-              records: Array.isArray(records) ? records : [],
+              records: (Array.isArray(records) ? records : []).map(mapApiDnsRecord),
               loading: false,
-              source: 'registrar',
+              source: 'customer-ledger',
               error: null,
             });
           }
@@ -182,7 +196,7 @@ export function useDnsRecords(domainParam) {
             setState({
               records: [],
               loading: false,
-              source: 'registrar',
+              source: 'customer-ledger',
               error: error.message || 'Could not load DNS records.',
             });
           }

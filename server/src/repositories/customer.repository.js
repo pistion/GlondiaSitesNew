@@ -29,9 +29,6 @@ const SAFE_USER_SELECT = {
   disabledReason: true,
   deletedAt: true,
   reactivatedAt: true,
-  promoEligible: true,
-  promoSignupRank: true,
-  promoClaimedAt: true,
   createdAt: true,
   updatedAt: true,
 };
@@ -138,6 +135,22 @@ export async function listServiceRequestsByUser(userId, email = null, { limit = 
         ...(email ? [{ contactEmail: email }] : []),
       ],
     },
+    orderBy: { createdAt: 'desc' },
+    take: Number(limit),
+  });
+}
+
+export async function listAnalyticsForCustomer(userId, organizationIds = [], { limit = 100 } = {}) {
+  return prisma.analyticsEvent.findMany({
+    where: { OR: [{ userId }, ...(organizationIds.length ? [{ organizationId: { in: organizationIds } }] : [])] },
+    orderBy: { createdAt: 'desc' },
+    take: Number(limit),
+  });
+}
+
+export async function listAdminNotesForCustomer(userId, { limit = 100 } = {}) {
+  return prisma.adminNote.findMany({
+    where: { targetUserId: userId },
     orderBy: { createdAt: 'desc' },
     take: Number(limit),
   });

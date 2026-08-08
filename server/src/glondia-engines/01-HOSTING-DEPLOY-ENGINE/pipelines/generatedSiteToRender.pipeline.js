@@ -14,16 +14,27 @@ import { publishGeneratedSiteToGitHub, resolveGitHubPublisherToken } from '../03
 import { publishDirectoryToTemporaryRepo, shouldUseTemporaryRepo } from '../03-GITHUB-SOURCE-MOUNTAIN/temporaryRepoManager.stage.js';
 import { startPostDeployPolling } from '../../../services/deploymentPostDeployPoller.js';
 import { shouldAttachDeploymentBilling, queueDeploymentBillingAttach } from '../00-SHARED/deploymentBillingAttach.service.js';
+import { publishStaticSiteToVps } from '../06-VPS-HOSTING-MOUNTAIN/vpsHostingPublisher.stage.js';
 
 const DEFAULT_GENERATED_SITES_REPO_URL = 'https://github.com/pistion/glondia-generated-sites.git';
 
 export async function run(input = {}, context = {}) {
   const normalized = normalizeGeneratedSiteInput(input, context);
+  const requestedProvider = input.hostingTarget || input.hostingProvider || '';
+  if (['vultr', 'dedicated', 'dedicated-vultr'].includes(String(requestedProvider).toLowerCase())) {
+    const error = new Error('Provision the dedicated Vultr server first, then publish the generated site to it.');
+    error.status = 409;
+    error.code = 'DEDICATED_SERVER_REQUIRED';
+    error.stage = 'provider_select';
+    throw error;
+  }
+  const useSharedServer = !(context.isAdmin === true && String(requestedProvider).toLowerCase() === 'render');
   const deployment = await createDeploymentRecord({
     userId: normalized.userId,
     siteId: normalized.siteId,
     projectId: normalized.projectId || normalized.siteId,
     serviceName: renderSafeName(normalized.slug || normalized.siteName),
+    provider: useSharedServer ? 'vps' : 'render',
     serviceType: normalized.serviceType,
     source: normalized.source,
     sourceReference: normalized.sourceReference,
@@ -44,6 +55,95 @@ export async function run(input = {}, context = {}) {
 
   await addDeploymentLog(deployment.deploymentId, 'Generated site handoff received from Template AI.', 'info');
   await addDeploymentLog(deployment.deploymentId, `Generated Vite source directory: ${normalized.generatedSite.siteDir}.`, 'ok');
+
+  if (useSharedServer) {
+    try {
+      await updateDeploymentRecord(deployment.deploymentId, {
+        provider: 'vps',
+        currentStep: 'Building on Glondia shared server',
+        buildStatus: 'building',
+      });
+      await addDeploymentLog(deployment.deploymentId, 'Selected hosting target: Glondia Shared Server.', 'info', {
+        provider: 'vps',
+        stage: 'provider_select',
+      });
+      const vpsResult = await publishStaticSiteToVps({
+        deploymentId: deployment.deploymentId,
+        sourceDir: normalized.generatedSite.siteDir,
+        serviceType: normalized.serviceType,
+        buildCommand: normalized.buildCommand,
+        publishDirectory: normalized.publishDirectory,
+        onLog: ({ message, level, source, stage }) =>
+          addDeploymentLog(deployment.deploymentId, message, level, { source, stage }),
+      });
+      await addDeploymentLog(deployment.deploymentId, `Published generated site to Glondia Shared Server: ${vpsResult.liveUrl}`, 'ok', {
+        provider: 'vps',
+        stage: 'publish',
+        publicPath: vpsResult.publicPath,
+      });
+      const updated = await updateDeploymentRecord(deployment.deploymentId, {
+        provider: 'vps',
+        platformDeployed: true,
+        status: 'live',
+        buildStatus: 'succeeded',
+        currentStep: 'Live on Glondia shared server',
+        paymentStatus: 'billing_pending',
+        subscriptionStatus: 'trial_pending',
+        billingAttachStatus: 'queued',
+        renderServiceId: vpsResult.serviceId,
+        renderDeployId: vpsResult.deployId,
+        providerServiceId: vpsResult.serviceId,
+        providerDeployId: vpsResult.deployId,
+        providerStatus: vpsResult.providerStatus,
+        liveUrl: vpsResult.liveUrl,
+        verifiedUrl: vpsResult.liveUrl,
+        urlReachable: true,
+        vpsHosting: vpsResult,
+        render: null,
+        errorMessage: null,
+        lastDeployedAt: new Date().toISOString(),
+        environmentConfiguration: {
+          ...deployment.environmentConfiguration,
+          provider: 'vps',
+        },
+      });
+      if (input.skipBillingAttach !== true) {
+        queueDeploymentBillingAttach({
+          deployment: updated,
+          user: { id: normalized.userId },
+          kind: normalized.source || 'generated-template',
+        });
+      }
+      return updated;
+    } catch (error) {
+      if (!renderApiService.configured()) {
+        return updateDeploymentRecord(deployment.deploymentId, {
+          provider: 'vps',
+          platformDeployed: false,
+          status: 'failed',
+          buildStatus: 'failed',
+          currentStep: 'Hosting deployment failed',
+          paymentStatus: 'not_billable_yet',
+          subscriptionStatus: 'not_started',
+          billingAttachStatus: 'not_started',
+          errorMessage: 'Hosting deployment failed. Contact Glondia support.',
+          errorDetails: error.details || null,
+          internalProviderError: { provider: 'vps', message: error.message, stage: error.stage || 'vps_publish' },
+        });
+      }
+      await updateDeploymentRecord(deployment.deploymentId, {
+        providerFailover: {
+          from: 'vps',
+          to: 'render',
+          reason: error.message,
+          stage: error.stage || 'vps_publish',
+          occurredAt: new Date().toISOString(),
+        },
+        currentStep: 'Retrying deployment',
+        buildStatus: 'retrying',
+      });
+    }
+  }
 
   let activeSourceRepo = normalized.sourceRepo;
   let activeBranch = normalized.branch;
@@ -156,6 +256,7 @@ export async function run(input = {}, context = {}) {
 
     const updated = await updateDeploymentRecord(deployment.deploymentId, {
       ...basePatch,
+      provider: 'render',
       platformDeployed: true,
       status: 'building',
       buildStatus: 'queued',
@@ -165,6 +266,8 @@ export async function run(input = {}, context = {}) {
       billingAttachStatus: 'queued',
       renderServiceId: renderResult.serviceId,
       renderDeployId: renderResult.deployId,
+      providerServiceId: renderResult.serviceId,
+      providerDeployId: renderResult.deployId,
       providerStatus: renderResult.providerStatus,
       liveUrl: renderResult.liveUrl || `https://${normalized.slug}.onrender.com`,
       render: {
@@ -184,7 +287,6 @@ export async function run(input = {}, context = {}) {
         deployment: updated,
         user: { id: normalized.userId },
         kind: normalized.source || 'generated-template',
-        billingTierId: input.billingTierId || input.tierId || null,
       });
     }
 

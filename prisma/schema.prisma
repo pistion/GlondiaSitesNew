@@ -39,24 +39,19 @@ model User {
   disabledReason           String?   @map("disabled_reason")
   deletedAt                DateTime? @map("deleted_at")
   reactivatedAt            DateTime? @map("reactivated_at")
-  // Launch promo lifecycle. Eligibility is granted to the first N registered
-  // users (DEPLOYMENT_PROMO_SIGNUP_LIMIT, default 20). The K50 promo can be
-  // claimed once per user; promoClaimedAt is set only after a verified payment.
-  promoEligible            Boolean   @default(false) @map("promo_eligible")
-  promoSignupRank          Int?      @map("promo_signup_rank")
-  promoClaimedAt           DateTime? @map("promo_claimed_at")
-  promoClaimedOrderId      String?   @map("promo_claimed_order_id")
-  promoClaimedDeploymentId String?   @map("promo_claimed_deployment_id")
   createdAt                DateTime  @default(now()) @map("created_at")
   updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  refreshTokens RefreshToken[]
-  projects      ClientProject[]
+  refreshTokens   RefreshToken[]
+  projects        ClientProject[]
   builderProjects BuilderProject[]
+  emailMailboxes  EmailMailbox[]
+  emailTransportSettings EmailTransportSetting[]
+  mailFolders     MailFolder[]
+  mailMessages    MailMessage[]
 
   @@index([accountStatus])
   @@index([createdAt])
-  @@index([promoSignupRank])
   @@map("users")
 }
 
@@ -85,7 +80,7 @@ model BuilderProject {
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  user            User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user             User                     @relation(fields: [userId], references: [id], onDelete: Restrict)
   revisions        BuilderRevision[]
   jobs             BuilderJob[]
   previewGrants    BuilderPreviewGrant[]
@@ -158,8 +153,8 @@ model BuilderJob {
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  project  BuilderProject   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  revision BuilderRevision? @relation(fields: [revisionId], references: [id], onDelete: SetNull)
+  project  BuilderProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  revision BuilderRevision?  @relation(fields: [revisionId], references: [id], onDelete: SetNull)
   events   BuilderJobEvent[]
 
   @@index([status, availableAt])
@@ -297,6 +292,11 @@ model ClientProject {
   status      String    @default("draft") // draft | active | paused | completed | archived
   priority    String    @default("normal")
   description String?
+  storageNamespace  String    @map("storage_namespace")
+  autoBillingEnabled Boolean  @default(false) @map("auto_billing_enabled")
+  billingAmount     Decimal   @default(0) @map("billing_amount")
+  billingCurrency   String    @default("PGK") @map("billing_currency")
+  billingInterval   String    @default("monthly") @map("billing_interval")
   metadata    String    @default("{}")
   archivedAt  DateTime? @map("archived_at")
   createdAt   DateTime  @default(now()) @map("created_at")
@@ -354,6 +354,7 @@ model RefreshToken {
 
 model VpsService {
   id                 String    @id @default(uuid())
+  clientProjectId    String?   @map("client_project_id")
   organizationId     String    @map("organization_id")
   createdByUserId    String?   @map("created_by_user_id")
   checkoutOrderId    String?   @map("checkout_order_id")
@@ -386,6 +387,7 @@ model VpsService {
   actionLogs VpsActionLog[]
 
   @@index([organizationId])
+  @@index([clientProjectId])
   @@index([providerInstanceId])
   @@index([paypalOrderId])
   @@index([checkoutOrderId])
@@ -409,6 +411,18 @@ model VpsActionLog {
   @@index([vpsServiceId])
   @@index([organizationId, createdAt])
   @@map("vps_action_logs")
+}
+
+model VpsCatalogSnapshot {
+  kind          String    @id
+  payload       String    @default("[]")
+  syncStatus    String    @default("seeded") @map("sync_status")
+  errorMessage  String?   @map("error_message")
+  lastSyncedAt  DateTime? @map("last_synced_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@map("vps_catalog_snapshots")
 }
 
 // Ownership map for provider-account-level resources (SSH keys, snapshots,
@@ -440,6 +454,7 @@ model ProviderResource {
 
 model WebHostingService {
   id                String    @id @default(uuid())
+  clientProjectId   String?   @map("client_project_id")
   organizationId    String    @map("organization_id")
   createdByUserId   String?   @map("created_by_user_id")
   checkoutOrderId   String?   @map("checkout_order_id")
@@ -471,6 +486,7 @@ model WebHostingService {
 
   @@unique([organizationId, slug])
   @@index([organizationId])
+  @@index([clientProjectId])
   @@index([providerServiceId])
   @@index([checkoutOrderId])
   @@map("web_hosting_services")
@@ -478,8 +494,356 @@ model WebHostingService {
 
 // ─── Business Services (domains, email hosting, SSL, etc.) ───────────────────
 
+model CloudStorageService {
+  id                    String    @id @default(uuid())
+  clientProjectId       String?   @map("client_project_id")
+  organizationId        String    @map("organization_id")
+  createdByUserId       String?   @map("created_by_user_id")
+  checkoutOrderId       String?   @map("checkout_order_id")
+  name                  String
+  serviceKind           String    @map("service_kind")
+  tenancy               String
+  planKey               String    @map("plan_key")
+  planSize              String    @map("plan_size")
+  region                String
+  postgresVersion       String?   @map("postgres_version")
+  provider              String    @default("vultr")
+  providerResourceId    String?   @map("provider_resource_id")
+  providerSecondaryId   String?   @map("provider_secondary_id")
+  status                String    @default("pending_payment")
+  provisioningStage     String    @default("intent_recorded") @map("provisioning_stage")
+  syncStatus            String    @default("pending") @map("sync_status")
+  adminStatus           String    @default("allowed") @map("admin_status")
+  paymentStatus         String    @default("pending") @map("payment_status")
+  capacityBytes         String    @default("0") @map("capacity_bytes")
+  transferIncludedBytes String    @default("0") @map("transfer_included_bytes")
+  storageUsedBytes      String    @default("0") @map("storage_used_bytes")
+  transferUsedBytes     String    @default("0") @map("transfer_used_bytes")
+  overageStorageBytes   String    @default("0") @map("overage_storage_bytes")
+  overageTransferBytes  String    @default("0") @map("overage_transfer_bytes")
+  monthlyCostCents      Int       @default(0) @map("monthly_cost_cents")
+  markupPercent         Float     @default(30) @map("markup_percent")
+  markupAmountCents     Int       @default(0) @map("markup_amount_cents")
+  totalPriceCents       Int       @default(0) @map("total_price_cents")
+  currency              String    @default("USD")
+  deploymentBranch      String    @default("main") @map("deployment_branch")
+  publicAccess          Boolean   @default(false) @map("public_access")
+  corsOrigins           String    @default("[]") @map("cors_origins")
+  trustedNetworks       String    @default("[]") @map("trusted_networks")
+  externalAccessEnabled Boolean   @default(false) @map("external_access_enabled")
+  privateNetworkAttached Boolean  @default(false) @map("private_network_attached")
+  retentionDaily        Int       @default(7) @map("retention_daily")
+  retentionWeekly       Int       @default(4) @map("retention_weekly")
+  credentialsCiphertext String?   @map("credentials_ciphertext")
+  provisioningSecretCiphertext String? @map("provisioning_secret_ciphertext")
+  credentialsPreview    String?   @map("credentials_preview")
+  lastSyncedAt          DateTime? @map("last_synced_at")
+  paidAt                DateTime? @map("paid_at")
+  activatedAt           DateTime? @map("activated_at")
+  suspendedAt           DateTime? @map("suspended_at")
+  deletedAt             DateTime? @map("deleted_at")
+  metadata              String    @default("{}")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  actions       CloudStorageActionLog[]
+  usageSamples  CloudStorageUsageSample[]
+  restorePoints CloudStorageRestorePoint[]
+  storedObjects CloudStorageObject[]
+  repoLinks     CloudStorageRepositoryLink[]
+  driveCredential CloudDriveCredential?
+  driveSessions   CloudDriveSession[]
+
+  @@index([organizationId, serviceKind])
+  @@index([clientProjectId])
+  @@index([createdByUserId])
+  @@index([checkoutOrderId])
+  @@index([providerResourceId])
+  @@index([status, paymentStatus])
+  @@map("cloud_storage_services")
+}
+
+model CloudDriveCredential {
+  id                        String    @id @default(uuid())
+  serviceId                 String    @unique @map("service_id")
+  userId                    String?   @map("user_id")
+  accountEmail              String    @map("account_email")
+  passwordHash              String    @map("password_hash")
+  initialPasswordCiphertext String?   @map("initial_password_ciphertext")
+  initialPasswordViewedAt   DateTime? @map("initial_password_viewed_at")
+  passwordVersion           Int       @default(1) @map("password_version")
+  twoFactorEnabled          Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorMethod           String?   @map("two_factor_method")
+  lastLoginAt               DateTime? @map("last_login_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("cloud_drive_credentials")
+}
+
+model CloudDriveSession {
+  id           String    @id @default(uuid())
+  serviceId    String    @map("service_id")
+  userId       String?   @map("user_id")
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  lastUsedAt   DateTime  @default(now()) @map("last_used_at")
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@index([serviceId, expiresAt])
+  @@index([userId])
+  @@map("cloud_drive_sessions")
+}
+
+model CloudStorageCatalogSnapshot {
+  id           String    @id @default(uuid())
+  catalogKey   String    @unique @map("catalog_key")
+  payload      String
+  syncStatus   String    @default("seeded") @map("sync_status")
+  errorMessage String?   @map("error_message")
+  lastSyncedAt DateTime? @map("last_synced_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("cloud_storage_catalog_snapshots")
+}
+
+model CloudStorageActionLog {
+  id                String   @id @default(uuid())
+  serviceId         String   @map("service_id")
+  organizationId    String   @map("organization_id")
+  actorUserId       String?  @map("actor_user_id")
+  action            String
+  stage             String
+  status            String   @default("pending")
+  request           String   @default("{}")
+  response          String   @default("{}")
+  errorMessage      String?  @map("error_message")
+  providerRequestId String?  @map("provider_request_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@index([serviceId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("cloud_storage_action_logs")
+}
+
+model CloudStorageUsageSample {
+  id                 String   @id @default(uuid())
+  serviceId          String   @map("service_id")
+  periodKey          String   @map("period_key")
+  storageBytes       String   @default("0") @map("storage_bytes")
+  transferBytes      String   @default("0") @map("transfer_bytes")
+  requestCount       Int      @default(0) @map("request_count")
+  overageAmountCents Int      @default(0) @map("overage_amount_cents")
+  source             String   @default("provider")
+  providerPayload    String?  @map("provider_payload")
+  sampledAt          DateTime @map("sampled_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, periodKey, sampledAt])
+  @@index([serviceId, sampledAt])
+  @@map("cloud_storage_usage_samples")
+}
+
+model CloudStorageRestorePoint {
+  id                 String    @id @default(uuid())
+  serviceId          String    @map("service_id")
+  providerSnapshotId String?   @map("provider_snapshot_id")
+  kind               String    @default("daily")
+  status             String    @default("available")
+  sizeBytes          String    @default("0") @map("size_bytes")
+  expiresAt          DateTime? @map("expires_at")
+  restoredAt         DateTime? @map("restored_at")
+  metadata           String    @default("{}")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@index([serviceId, createdAt])
+  @@map("cloud_storage_restore_points")
+}
+
+model CloudStorageObject {
+  id          String    @id @default(uuid())
+  serviceId   String    @map("service_id")
+  objectKey   String    @map("object_key")
+  displayName String    @map("display_name")
+  contentType String?   @map("content_type")
+  sizeBytes   String    @default("0") @map("size_bytes")
+  version     Int       @default(1)
+  status      String    @default("active")
+  checksum    String?
+  deletedAt   DateTime? @map("deleted_at")
+  metadata    String    @default("{}")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, objectKey, version])
+  @@index([serviceId, status])
+  @@map("cloud_storage_objects")
+}
+
+model CloudStorageRepositoryLink {
+  id                String   @id @default(uuid())
+  serviceId         String   @map("service_id")
+  hostingServiceId  String?  @map("hosting_service_id")
+  repositoryName    String   @map("repository_name")
+  deploymentBranch  String   @default("main") @map("deployment_branch")
+  webhookSecretHash String   @map("webhook_secret_hash")
+  lastDeliveryId    String?  @map("last_delivery_id")
+  lastCommitSha     String?  @map("last_commit_sha")
+  lastDeploymentId  String?  @map("last_deployment_id")
+  autoDeployEnabled Boolean  @default(true) @map("auto_deploy_enabled")
+  metadata          String   @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  service CloudStorageService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, repositoryName])
+  @@index([hostingServiceId])
+  @@map("cloud_storage_repository_links")
+}
+
+model HostingEnvironmentVariable {
+  id               String   @id @default(uuid())
+  hostingServiceId String   @map("hosting_service_id")
+  renderServiceId  String?  @map("render_service_id")
+  deploymentId     String   @map("deployment_id")
+  organizationId   String?  @map("organization_id")
+  createdByUserId  String?  @map("created_by_user_id")
+  key              String
+  environment      String   @default("production")
+  encrypted        Boolean  @default(true)
+  valuePreview     String   @map("value_preview")
+  valueCiphertext  String?  @map("value_ciphertext")
+  valuePlaintext   String?  @map("value_plaintext")
+  renderSynced     Boolean  @default(false) @map("render_synced")
+  requiresRedeploy Boolean  @default(true) @map("requires_redeploy")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@unique([hostingServiceId, key, environment])
+  @@index([deploymentId])
+  @@index([renderServiceId])
+  @@index([organizationId])
+  @@index([createdByUserId])
+  @@map("hosting_environment_variables")
+}
+
+model HostingHeader {
+  id               String   @id @default(uuid())
+  hostingServiceId String   @map("hosting_service_id")
+  renderServiceId  String?  @map("render_service_id")
+  deploymentId     String   @map("deployment_id")
+  organizationId   String?  @map("organization_id")
+  createdByUserId  String?  @map("created_by_user_id")
+  path             String   @default("/*")
+  name             String
+  value            String
+  providerSynced   Boolean  @default(false) @map("provider_synced")
+  providerError    String?  @map("provider_error")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@unique([hostingServiceId, path, name])
+  @@index([deploymentId])
+  @@index([renderServiceId])
+  @@index([organizationId])
+  @@index([createdByUserId])
+  @@map("hosting_headers")
+}
+
+model HostingDisk {
+  id                 String   @id @default(uuid())
+  diskId             String   @map("disk_id")
+  hostingServiceId   String   @map("hosting_service_id")
+  renderServiceId    String?  @map("render_service_id")
+  deploymentId       String   @map("deployment_id")
+  organizationId     String?  @map("organization_id")
+  createdByUserId    String?  @map("created_by_user_id")
+  name               String
+  mountPath          String   @map("mount_path")
+  sizeGB             Int      @map("size_gb")
+  status             String   @default("pending_provider")
+  providerSyncStatus String   @default("pending_provider") @map("provider_sync_status")
+  providerError      String?  @map("provider_error")
+  renderDiskJson     String?  @map("render_disk_json")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([hostingServiceId, diskId])
+  @@index([deploymentId])
+  @@index([renderServiceId])
+  @@index([organizationId])
+  @@index([createdByUserId])
+  @@map("hosting_disks")
+}
+
+model HostingMetricSample {
+  id               String   @id @default(uuid())
+  hostingServiceId String   @map("hosting_service_id")
+  renderServiceId  String?  @map("render_service_id")
+  deploymentId     String   @map("deployment_id")
+  organizationId   String?  @map("organization_id")
+  createdByUserId  String?  @map("created_by_user_id")
+  metricType       String   @map("metric_type")
+  unit             String   @default("value")
+  rangeKey         String   @default("12h") @map("range_key")
+  resolution       String   @default("hour")
+  sampleAt         DateTime @map("sample_at")
+  value            Float
+  source           String   @default("provider")
+  providerPayload  String?  @map("provider_payload")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([hostingServiceId, metricType, rangeKey, sampleAt])
+  @@index([deploymentId, metricType, sampleAt])
+  @@index([renderServiceId])
+  @@index([organizationId])
+  @@index([createdByUserId])
+  @@map("hosting_metric_samples")
+}
+
+model HostingUsageSummary {
+  id                 String   @id @default(uuid())
+  hostingServiceId   String   @map("hosting_service_id")
+  renderServiceId    String?  @map("render_service_id")
+  deploymentId       String   @map("deployment_id")
+  organizationId     String?  @map("organization_id")
+  createdByUserId    String?  @map("created_by_user_id")
+  periodKey          String   @map("period_key")
+  bandwidthUsedMb    Float    @default(0) @map("bandwidth_used_mb")
+  requestCount       Int      @default(0) @map("request_count")
+  eventCount         Int      @default(0) @map("event_count")
+  source             String   @default("provider")
+  lastProviderSyncAt DateTime? @map("last_provider_sync_at")
+  metadata           String   @default("{}")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([hostingServiceId, periodKey])
+  @@index([deploymentId, periodKey])
+  @@index([organizationId])
+  @@index([createdByUserId])
+  @@map("hosting_usage_summaries")
+}
+
 model BusinessService {
   id                 String    @id @default(uuid())
+  clientProjectId    String?   @map("client_project_id")
   organizationId     String    @map("organization_id")
   createdByUserId    String?   @map("created_by_user_id")
   checkoutOrderId    String?   @map("checkout_order_id")
@@ -503,10 +867,262 @@ model BusinessService {
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
+  emailMailbox EmailMailbox?
+
   @@index([organizationId])
+  @@index([clientProjectId])
   @@index([type, status])
   @@index([checkoutOrderId])
   @@map("business_services")
+}
+
+model DomainAddonService {
+  id                     String    @id
+  clientProjectId        String?   @map("client_project_id")
+  userId                 String    @map("user_id")
+  organizationId         String    @map("organization_id")
+  domainServiceId        String    @map("domain_service_id")
+  addonKey                String    @map("addon_key")
+  name                    String
+  status                  String    @default("provisioning")
+  provisioningStage       String    @default("record_request") @map("provisioning_stage")
+  internalProvider        String    @map("internal_provider")
+  providerZoneId          String?   @map("provider_zone_id")
+  providerSubscriptionId  String?   @map("provider_subscription_id")
+  providerRatePlanId      String?   @map("provider_rate_plan_id")
+  providerAmountCents     Int       @default(0) @map("provider_amount_cents")
+  markupPercent           Float     @default(30) @map("markup_percent")
+  markupAmountCents       Int       @default(0) @map("markup_amount_cents")
+  totalAmountCents        Int       @default(0) @map("total_amount_cents")
+  currency                String    @default("USD")
+  billingCycle            String    @default("monthly") @map("billing_cycle")
+  billingStatus           String    @default("pending") @map("billing_status")
+  paymentStatus           String    @default("pending") @map("payment_status")
+  checkoutOrderId         String?   @map("checkout_order_id")
+  invoiceId               String?   @map("invoice_id")
+  invoiceLineItemId       String?   @map("invoice_line_item_id")
+  paymentTransactionId    String?   @map("payment_transaction_id")
+  paymentMethodId         String?   @map("payment_method_id")
+  renewsAt                DateTime? @map("renews_at")
+  activatedAt             DateTime? @map("activated_at")
+  suspendedAt             DateTime? @map("suspended_at")
+  cancelledAt             DateTime? @map("cancelled_at")
+  metadata                String    @default("{}")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  @@unique([domainServiceId, addonKey])
+  @@index([userId, domainServiceId])
+  @@index([organizationId, billingStatus])
+  @@index([clientProjectId])
+  @@index([invoiceId])
+  @@index([paymentStatus, renewsAt])
+  @@map("domain_addon_services")
+}
+
+model EmailMailbox {
+  id                String   @id @default(uuid())
+  clientProjectId   String?  @map("client_project_id")
+  userId            String   @map("user_id")
+  planServiceId     String   @map("plan_service_id")
+  businessServiceId String   @unique @map("business_service_id")
+  email             String   @unique
+  localPart         String   @map("local_part")
+  domain            String
+  passwordHash      String   @map("password_hash")
+  status            String   @default("pending_setup")
+  storageLimitBytes String   @default("5368709120") @map("storage_limit_bytes")
+  storageUsedBytes  String   @default("0") @map("storage_used_bytes")
+  usageSource       String   @default("pending_provider") @map("usage_source")
+  lastUsageSyncAt   DateTime? @map("last_usage_sync_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user            User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  businessService BusinessService @relation(fields: [businessServiceId], references: [id], onDelete: Restrict)
+  transportSettings EmailTransportSetting?
+  folders           MailFolder[]
+  messages          MailMessage[]
+  @@index([userId, status])
+  @@index([clientProjectId])
+  @@index([planServiceId])
+  @@map("email_mailboxes")
+}
+
+model MailFolder {
+  id               String    @id @default(uuid())
+  userId           String    @map("user_id")
+  organizationId   String    @map("organization_id")
+  emailMailboxId   String    @map("email_mailbox_id")
+  providerFolderId String    @map("provider_folder_id")
+  name             String
+  role             String?
+  uidValidity      String?   @map("uid_validity")
+  lastSyncedAt     DateTime? @map("last_synced_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  emailMailbox EmailMailbox  @relation(fields: [emailMailboxId], references: [id], onDelete: Cascade)
+  messages     MailMessage[]
+
+  @@unique([emailMailboxId, providerFolderId])
+  @@index([userId, organizationId])
+  @@index([emailMailboxId, role])
+  @@map("mail_folders")
+}
+
+model MailMessage {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  organizationId    String    @map("organization_id")
+  emailMailboxId    String    @map("email_mailbox_id")
+  folderId          String    @map("folder_id")
+  providerMessageId String    @map("provider_message_id")
+  internetMessageId String?   @map("internet_message_id")
+  subject           String    @default("")
+  fromJson          String    @default("[]") @map("from_json")
+  toJson            String    @default("[]") @map("to_json")
+  ccJson            String    @default("[]") @map("cc_json")
+  replyToJson       String    @default("[]") @map("reply_to_json")
+  textBody          String    @default("") @map("text_body")
+  htmlBody          String    @default("") @map("html_body")
+  flagsJson         String    @default("[]") @map("flags_json")
+  sentAt            DateTime? @map("sent_at")
+  receivedAt        DateTime? @map("received_at")
+  sizeBytes         Int       @default(0) @map("size_bytes")
+  hasAttachments    Boolean   @default(false) @map("has_attachments")
+  importedAt        DateTime  @default(now()) @map("imported_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  emailMailbox EmailMailbox     @relation(fields: [emailMailboxId], references: [id], onDelete: Cascade)
+  folder       MailFolder       @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  attachments  MailAttachment[]
+
+  @@unique([folderId, providerMessageId])
+  @@index([userId, emailMailboxId, receivedAt])
+  @@index([emailMailboxId, folderId])
+  @@map("mail_messages")
+}
+
+model MailAttachment {
+  id          String   @id @default(uuid())
+  messageId   String   @map("message_id")
+  filename    String
+  contentType String   @map("content_type")
+  sizeBytes   Int      @default(0) @map("size_bytes")
+  content     Bytes?
+  contentId   String?  @map("content_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  message MailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@map("mail_attachments")
+}
+
+model EmailTransportSetting {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  organizationId    String   @map("organization_id")
+  emailMailboxId    String   @unique @map("email_mailbox_id")
+  provider          String
+  username          String
+  imapHost          String   @map("imap_host")
+  imapPort          Int      @map("imap_port")
+  imapSecurity      String   @default("SSL/TLS") @map("imap_security")
+  smtpHost          String   @map("smtp_host")
+  smtpPort          Int      @map("smtp_port")
+  smtpSecurity      String   @default("SSL/TLS") @map("smtp_security")
+  authenticationRequired Boolean @default(true) @map("authentication_required")
+  source            String   @default("provider_catalog")
+  lastSyncedAt      DateTime @default(now()) @map("last_synced_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  emailMailbox EmailMailbox @relation(fields: [emailMailboxId], references: [id], onDelete: Cascade)
+
+  @@index([userId, organizationId])
+  @@index([provider])
+  @@map("email_transport_settings")
+}
+
+model EmailDnsRecord {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  organizationId String    @map("organization_id")
+  domain         String
+  provider       String
+  recordKey      String    @map("record_key")
+  type           String
+  name           String
+  value          String
+  priority       Int?
+  ttl            Int?
+  status         String    @default("active")
+  syncStatus     String    @default("synced") @map("sync_status")
+  source         String    @default("provider_api")
+  metadata       String    @default("{}")
+  lastSyncedAt   DateTime  @default(now()) @map("last_synced_at")
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, domain, provider, recordKey])
+  @@index([userId, domain, deletedAt])
+  @@index([organizationId, domain])
+  @@map("email_dns_records")
+}
+
+model DomainDnsRecord {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  organizationId String    @map("organization_id")
+  domainServiceId String   @map("domain_service_id")
+  domain         String
+  provider       String
+  recordKey      String    @map("record_key")
+  type           String
+  name           String
+  value          String
+  priority       Int?
+  ttl            Int?
+  proxied        Boolean   @default(false)
+  status         String    @default("active")
+  metadata       String    @default("{}")
+  lastSyncedAt   DateTime  @default(now()) @map("last_synced_at")
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, domainServiceId, provider, recordKey])
+  @@index([userId, domainServiceId, deletedAt])
+  @@index([organizationId, domain])
+  @@map("domain_dns_records")
+}
+
+model DomainServiceSnapshot {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  organizationId  String    @map("organization_id")
+  domainServiceId String    @map("domain_service_id")
+  domain          String
+  provider        String
+  feature         String
+  status          String    @default("synced")
+  payload         String    @default("{}")
+  errorMessage    String?   @map("error_message")
+  lastSyncedAt    DateTime? @map("last_synced_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([domainServiceId, provider, feature])
+  @@index([userId, domainServiceId])
+  @@index([organizationId, domain])
+  @@map("domain_service_snapshots")
 }
 
 // ─── Checkout Orders ──────────────────────────────────────────────────────────
@@ -596,9 +1212,227 @@ model PaymentReceipt {
   @@map("payment_receipts")
 }
 
+// ─── Unified Billing Ledger ──────────────────────────────────────────────────
+// One relational billing timeline for every billable thing on the platform.
+// The UI decides the level by filtering:
+//   platform/account  → userId / organizationId
+//   service category  → serviceType
+//   unique item       → serviceType + serviceId
+//
+// Existing source tables stay intact (checkout_orders, invoices, vps_services,
+// business_services, etc.). This ledger gives them one consistent, queryable
+// billing surface without creating separate billing tables for each service.
+
+model BillingLedger {
+  id              String    @id @default(uuid())
+  userId          String?   @map("user_id")
+  organizationId  String?   @map("organization_id")
+  scope           String    @default("item") @map("scope") // platform | service | item
+  serviceType     String    @map("service_type") // hosting | vps | domain | email | builder | support | platform | other
+  serviceId       String?   @map("service_id")
+  serviceName     String?   @map("service_name")
+  billingType     String    @map("billing_type") // charge | payment | credit | invoice | usage | refund | adjustment
+  classification  String    @default("charge") // usage_charge | recurring_charge | invoice | payment_attempt | payment | refund | credit | discount | adjustment
+  stage           String    @default("recorded") // metered | rated | invoiced | payment_pending | payment_failed | paid | refunded
+  direction       String    @default("debit") // debit | credit | neutral
+  sourceTable     String?   @map("source_table")
+  sourceId        String?   @map("source_id")
+  checkoutOrderId String?   @map("checkout_order_id")
+  invoiceId       String?   @map("invoice_id")
+  paymentMethodId String?   @map("payment_method_id")
+  receiptId       String?   @map("receipt_id")
+  invoiceLineItemId String? @map("invoice_line_item_id")
+  description     String?
+  quantity        Int       @default(1)
+  unitCents       Int       @default(0) @map("unit_cents")
+  providerAmountCents Int?  @map("provider_amount_cents")
+  markupPercent   Float     @default(0) @map("markup_percent")
+  markupAmountCents Int     @default(0) @map("markup_amount_cents")
+  amountCents     Int       @default(0) @map("amount_cents")
+  currency        String    @default("USD")
+  status          String    @default("pending") // pending | paid | failed | overdue | credited | cancelled | voided
+  periodStart     DateTime? @map("period_start")
+  periodEnd       DateTime? @map("period_end")
+  dueAt           DateTime? @map("due_at")
+  paidAt          DateTime? @map("paid_at")
+  metadata        String    @default("{}")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([sourceTable, sourceId, billingType])
+  @@index([userId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([scope, createdAt])
+  @@index([serviceType, createdAt])
+  @@index([serviceType, serviceId, createdAt])
+  @@index([checkoutOrderId])
+  @@index([invoiceId])
+  @@index([invoiceLineItemId])
+  @@index([classification, stage])
+  @@index([status, dueAt])
+  @@map("billing_ledger")
+}
+
 // ─── Deployment Cleanup Jobs (audit trail for unpaid-grace enforcement) ──────
 // One row per cleanup action taken by the 12-hour grace enforcement service.
 // DB history is preserved — records are never deleted.
+
+// Durable metered usage. The resulting money amount is mirrored into
+// BillingLedger so account and service screens share one read model.
+model BillingUsageRecord {
+  id                String   @id @default(uuid())
+  userId            String?  @map("user_id")
+  organizationId    String?  @map("organization_id")
+  serviceType       String   @map("service_type")
+  serviceId         String?  @map("service_id")
+  serviceName       String?  @map("service_name")
+  chargeCategory    String   @default("usage") @map("charge_category") // usage | recurring | one_time | overage
+  meter             String
+  unit              String
+  quantity          Float    @default(0)
+  includedQuantity  Float    @default(0) @map("included_quantity")
+  billableQuantity  Float    @default(0) @map("billable_quantity")
+  provider          String   @default("platform")
+  providerRateId    String?  @map("provider_rate_id")
+  providerUsageId   String?  @map("provider_usage_id")
+  pricingModel      String   @default("metered") @map("pricing_model")
+  pricingSource     String   @default("platform") @map("pricing_source") // provider_api | contract | catalog | platform | legacy
+  providerUnitCostMicros Int? @map("provider_unit_cost_micros")
+  markupPercent     Float    @default(0) @map("markup_percent")
+  markupUnitCostMicros Int   @default(0) @map("markup_unit_cost_micros")
+  customerUnitCostMicros Int @default(0) @map("customer_unit_cost_micros")
+  unitCostMicros    Int      @default(0) @map("unit_cost_micros") // customer unit cost compatibility field
+  providerAmountCents Int?   @map("provider_amount_cents")
+  markupAmountCents Int      @default(0) @map("markup_amount_cents")
+  customerAmountCents Int    @default(0) @map("customer_amount_cents")
+  amountCents       Int      @default(0) @map("amount_cents") // customer amount compatibility field
+  currency          String   @default("USD")
+  status            String   @default("accruing")
+  source            String   @default("platform")
+  sourceRecordId    String?  @map("source_record_id")
+  periodStart       DateTime @map("period_start")
+  periodEnd         DateTime @map("period_end")
+  metadata          String   @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([serviceType, serviceId, meter, periodStart, periodEnd, source])
+  @@index([userId, periodStart])
+  @@index([organizationId, periodStart])
+  @@index([serviceType, serviceId, periodStart])
+  @@index([serviceType, chargeCategory, meter])
+  @@index([provider, providerUsageId])
+  @@index([status, periodEnd])
+  @@map("billing_usage_records")
+}
+
+// Provider-verified payment events. CheckoutOrder remains the commercial
+// intent; this table records captures, manual settlements, refunds and failures.
+model PaymentTransaction {
+  id                    String    @id @default(uuid())
+  userId                String?   @map("user_id")
+  organizationId        String?   @map("organization_id")
+  checkoutOrderId       String?   @map("checkout_order_id")
+  invoiceId             String?   @map("invoice_id")
+  paymentMethodId       String?   @map("payment_method_id")
+  receiptId             String?   @map("receipt_id")
+  serviceType           String?   @map("service_type")
+  serviceId             String?   @map("service_id")
+  transactionType       String    @default("payment") @map("transaction_type")
+  paymentStage          String    @default("attempt") @map("payment_stage") // attempt | authorization | capture | settlement | failure | refund
+  attemptNumber         Int       @default(1) @map("attempt_number")
+  provider              String    @default("manual")
+  providerTransactionId String?   @map("provider_transaction_id")
+  status                String    @default("pending")
+  amountCents           Int       @default(0) @map("amount_cents")
+  currency              String    @default("USD")
+  failureCode           String?   @map("failure_code")
+  failureMessage        String?   @map("failure_message")
+  processedAt           DateTime? @map("processed_at")
+  metadata              String    @default("{}")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@unique([provider, providerTransactionId, transactionType])
+  @@index([userId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([checkoutOrderId])
+  @@index([invoiceId])
+  @@index([serviceType, serviceId, createdAt])
+  @@index([status, createdAt])
+  @@index([paymentStage, status, createdAt])
+  @@map("payment_transactions")
+}
+
+// Money Glondia owes an infrastructure provider. This is deliberately separate
+// from PaymentTransaction: a client capture pays Glondia; it does not prove that
+// Vultr, Render, or another provider has been paid.
+model ProviderPayable {
+  id                    String    @id @default(uuid())
+  userId                String?   @map("user_id")
+  organizationId        String?   @map("organization_id")
+  provider              String
+  serviceType           String    @map("service_type")
+  serviceId             String?   @map("service_id")
+  invoiceId             String?   @map("invoice_id")
+  invoiceLineItemId     String?   @unique @map("invoice_line_item_id")
+  usageRecordId         String?   @map("usage_record_id")
+  providerReference     String?   @map("provider_reference")
+  providerServiceReference String? @map("provider_service_reference")
+  status                String    @default("recorded") // recorded | funded | settling | settled | failed | voided
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("USD")
+  fundedByTransactionId String?   @map("funded_by_transaction_id")
+  dueAt                 DateTime? @map("due_at")
+  settledAt             DateTime? @map("settled_at")
+  metadata              String    @default("{}")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@index([provider, status, dueAt])
+  @@index([invoiceId])
+  @@index([serviceType, serviceId])
+  @@index([provider, providerServiceReference])
+  @@index([fundedByTransactionId])
+  @@map("provider_payables")
+}
+
+// An outgoing payment/funding record from Glondia to a provider. Records may be
+// imported from provider billing history (for example Vultr autopay) or created
+// by a future provider-specific adapter.
+model ProviderSettlement {
+  id                    String    @id @default(uuid())
+  provider              String
+  providerTransactionId String    @map("provider_transaction_id")
+  status                String    @default("pending") // pending | processing | completed | failed | reversed
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("USD")
+  failureCode           String?   @map("failure_code")
+  failureMessage        String?   @map("failure_message")
+  processedAt           DateTime? @map("processed_at")
+  metadata              String    @default("{}")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@unique([provider, providerTransactionId])
+  @@index([provider, status, createdAt])
+  @@map("provider_settlements")
+}
+
+// Allows one provider payment to settle many detailed usage liabilities without
+// losing the exact cost attached to each service/invoice line.
+model SettlementAllocation {
+  id                   String   @id @default(uuid())
+  providerSettlementId String   @map("provider_settlement_id")
+  providerPayableId    String   @map("provider_payable_id")
+  amountCents          Int      @map("amount_cents")
+  currency             String   @default("USD")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  @@unique([providerSettlementId, providerPayableId])
+  @@index([providerPayableId])
+  @@map("settlement_allocations")
+}
 
 model DeploymentCleanupJob {
   id              String   @id @default(uuid())
@@ -645,6 +1479,7 @@ model AuditLog {
 
 model ServiceAccess {
   id              String    @id @default(uuid())
+  clientProjectId String?   @map("client_project_id")
   userId          String?   @map("user_id")
   organizationId  String?   @map("organization_id")
   serviceType     String    @map("service_type") // hosting | domain | vps | email | builder | support | other
@@ -668,6 +1503,7 @@ model ServiceAccess {
 
   @@unique([serviceType, serviceId])
   @@index([userId, serviceType])
+  @@index([clientProjectId])
   @@index([organizationId, serviceType])
   @@index([accessStatus])
   @@index([billingStatus])
@@ -1135,10 +1971,12 @@ model Invoice {
   orderId        String?   @map("order_id")
   invoiceNumber  String    @unique @map("invoice_number")
   status         String    @default("draft") // draft | issued | paid | voided | overdue
+  settlementStatus String  @default("not_ready") @map("settlement_status") // not_ready | funded | settling | settled | failed | not_applicable
   currency       String    @default("USD")
   subtotalCents  Int       @default(0) @map("subtotal_cents")
   taxCents       Int       @default(0) @map("tax_cents")
   discountCents  Int       @default(0) @map("discount_cents")
+  creditsCents   Int       @default(0) @map("credits_cents")
   totalCents     Int       @default(0) @map("total_cents")
   dueAt          DateTime? @map("due_at")
   issuedAt       DateTime? @map("issued_at")
@@ -1157,9 +1995,20 @@ model Invoice {
 model InvoiceLineItem {
   id          String   @id @default(uuid())
   invoiceId   String   @map("invoice_id")
+  serviceType String?  @map("service_type")
+  serviceId   String?  @map("service_id")
+  usageRecordId String? @map("usage_record_id")
+  lineClassification String @default("usage_charge") @map("line_classification") // usage_charge | recurring_charge | one_time_charge | coupon | discount | gift | special | credit | tax | adjustment
+  adjustmentType String? @map("adjustment_type")
+  direction   String   @default("debit") // debit | credit
+  sourceTable String?  @map("source_table")
+  sourceId    String?  @map("source_id")
   description String
   quantity    Int      @default(1)
   unitCents   Int      @default(0) @map("unit_cents")
+  providerAmountCents Int? @map("provider_amount_cents")
+  markupPercent Float @default(0) @map("markup_percent")
+  markupAmountCents Int @default(0) @map("markup_amount_cents")
   totalCents  Int      @default(0) @map("total_cents")
   metadata    String   @default("{}")
   createdAt   DateTime @default(now()) @map("created_at")
@@ -1167,6 +2016,10 @@ model InvoiceLineItem {
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId])
+  @@index([serviceType, serviceId])
+  @@index([usageRecordId])
+  @@index([lineClassification, direction])
+  @@index([sourceTable, sourceId])
   @@map("invoice_line_items")
 }
 

@@ -31,7 +31,16 @@ let tempDir;
 
 /** Real signed access token — dev header fallback is disabled in this suite. */
 function bearer(userId = 'sec-user') {
-  return `Bearer ${jwt.sign({ sub: userId, role: 'owner' }, JWT_SECRET, { expiresIn: '10m' })}`;
+  return `Bearer ${jwt.sign(
+    { sub: userId, role: 'owner' },
+    JWT_SECRET,
+    {
+      expiresIn: '10m',
+      issuer: 'glondia-sites',
+      audience: 'glondia-dashboard',
+      jwtid: `security-test-${userId}`,
+    },
+  )}`;
 }
 
 function api(path, { method = 'POST', auth, body, headers = {} } = {}) {

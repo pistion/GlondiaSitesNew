@@ -2,8 +2,10 @@ import {
   archiveProject,
   createProject,
   getProject,
+  getProjectSummary,
   listProjectServiceTypes,
   listProjects,
+  manageProjectService,
   projectDto,
   updateProject,
 } from '../services/projectService.js';
@@ -52,13 +54,7 @@ const ProjectController = {
 
   getProjectSummary: async (req, res, next) => {
     try {
-      const project = await getProject({ ...scope(req), projectId: req.params.projectId });
-      res.ok({
-        project: projectDto(project),
-        metrics: { visitors30d: 0, bandwidth30d: 0, requests30d: 0 },
-        services: [],
-        recentDeployments: [],
-      });
+      res.ok(await getProjectSummary({ ...scope(req), projectId: req.params.projectId }));
     } catch (error) {
       next(error);
     }
@@ -77,6 +73,22 @@ const ProjectController = {
     try {
       const project = await archiveProject({ ...scope(req), projectId: req.params.projectId });
       res.ok(projectDto(project));
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  manageProjectService: async (req, res, next) => {
+    try {
+      const result = await manageProjectService({
+        ...scope(req),
+        projectId: req.params.projectId,
+        serviceType: req.params.serviceType,
+        serviceId: req.params.serviceId,
+        action: req.body?.action,
+        input: req.body || {},
+      });
+      res.ok(result);
     } catch (error) {
       next(error);
     }

@@ -17,13 +17,17 @@ import {
   createDeploymentRenewalOrder,
 } from './deploymentBillingService.js';
 import { updateDeploymentRecord } from '../glondia-engines/00-SHARED/deploymentRecordStore.js';
-import { getPromoUsage } from './deploymentPromoService.js';
 import { syncServiceAccessOnPayment } from './serviceAccessService.js';
 import { createUserNotification } from './notificationService.js';
+import { recordPaymentTransaction } from './billingRecordsService.js';
 import { archiveGeneratedSiteFolder } from '../glondia-engines/01-HOSTING-DEPLOY-ENGINE/03-GITHUB-SOURCE-MOUNTAIN/generatedSiteRepoCleanup.stage.js';
 import * as adminUserRepo from '../repositories/adminUser.repository.js';
 import * as billingRepo from '../repositories/billing.repository.js';
 import * as auditRepo from '../repositories/audit.repository.js';
+import * as serviceAccessRepo from '../repositories/serviceAccess.repository.js';
+import * as vpsRepo from '../repositories/vps.repository.js';
+import * as customerRepo from '../repositories/customer.repository.js';
+import { resolveCustomerOwnershipScope } from './adminCustomerScope.js';
 
 const VALID_ROLES = new Set(['owner', 'admin', 'member']);
 const VALID_ACCOUNT_STATUS = new Set(['active', 'suspended', 'disabled', 'deleted']);
@@ -54,12 +58,6 @@ function userView(u) {
     disabledReason: u.disabledReason || null,
     deletedAt: u.deletedAt || null,
     reactivatedAt: u.reactivatedAt || null,
-    // Launch promo lifecycle (admin visibility).
-    promoEligible: u.promoEligible === true,
-    promoSignupRank: u.promoSignupRank ?? null,
-    promoClaimedAt: u.promoClaimedAt || null,
-    promoClaimedOrderId: u.promoClaimedOrderId || null,
-    promoClaimedDeploymentId: u.promoClaimedDeploymentId || null,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt,
   };
@@ -104,7 +102,6 @@ function deploymentView(d, orderByDeployment = {}) {
     liveUrl: d.liveUrl || null,
     platformDeployed: d.platformDeployed === true,
     // Launch pricing + Render plan lifecycle.
-    billingTierId: d.billingTierId || (order ? safeJson(order.metadata).billingTierId : null) || null,
     billingTierLabel: d.billingTierLabel || (order ? safeJson(order.metadata).billingTierLabel : null) || null,
     priceCents: d.priceCents ?? (order ? order.totalAmountCents : null) ?? null,
     priceCurrency: d.priceCurrency || (order ? order.currency : null) || null,
@@ -132,14 +129,65 @@ function safeJson(text) {
   try { return JSON.parse(text || '{}'); } catch { return {}; }
 }
 
+function vpsAdminView(record, access = null, customer = null) {
+  return {
+    id: record.id,
+    serviceType: 'vps',
+    label: record.label,
+    hostname: record.hostname,
+    organizationId: record.organizationId,
+    userId: access?.userId || record.createdByUserId || null,
+    customer: customer
+      ? { id: customer.id, email: customer.email, name: customer.name || null, clientId: customer.clientId || null }
+      : null,
+    provider: record.provider,
+    providerInstanceId: record.providerInstanceId,
+    status: record.deletedAt ? 'destroyed' : record.status,
+    mainIp: record.mainIp ?? null,
+    region: record.region,
+    plan: record.plan,
+    osId: record.osId,
+    osName: record.osName ?? null,
+    vcpuCount: record.vcpuCount ?? null,
+    ramMb: record.ramMb ?? null,
+    diskGb: record.diskGb ?? null,
+    totalPriceCents: record.totalPriceCents,
+    currency: record.currency || 'USD',
+    paymentStatus: record.paymentStatus,
+    checkoutOrderId: record.checkoutOrderId ?? null,
+    paypalOrderId: record.paypalOrderId ?? null,
+    accessStatus: access?.accessStatus ?? null,
+    billingStatus: access?.billingStatus ?? null,
+    adminStatus: access?.adminStatus ?? null,
+    serviceAccessId: access?.id ?? null,
+    startsAt: access?.startsAt ?? null,
+    expiresAt: access?.expiresAt ?? null,
+    deletedAt: record.deletedAt ?? null,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function lifecycleResult(account, { serviceAccess = {}, hosting = [], vps = {}, billing = {}, warnings = [] } = {}) {
+  const view = userView(account);
+  return {
+    ...view,
+    account: view,
+    serviceAccess,
+    hosting,
+    vps,
+    billing,
+    warnings,
+  };
+}
+
 export async function getOverview() {
-  const [userRows, orders, receiptsPending, cleanupJobs, deployments, promo] = await Promise.all([
+  const [userRows, orders, receiptsPending, cleanupJobs, deployments] = await Promise.all([
     adminUserRepo.listOverviewUsers(),
     billingRepo.listAdminDeploymentOrders({ select: { status: true, totalAmountCents: true, currency: true, metadata: true } }),
     billingRepo.countPendingReceipts(),
     billingRepo.countDeploymentCleanupJobs(),
     loadDeployments(),
-    getPromoUsage(),
   ]);
 
   // User breakdown
@@ -148,7 +196,6 @@ export async function getOverview() {
   const suspendedUsers  = userRows.filter((u) => u.accountStatus === 'suspended').length;
   const disabledUsers   = userRows.filter((u) => u.accountStatus === 'disabled').length;
   const deletedUsers    = userRows.filter((u) => u.accountStatus === 'deleted').length;
-  const promoUsers      = userRows.filter((u) => u.promoClaimedAt).length;
 
   const ordersByStatus = { paid: 0, pending: 0, payment_uploaded: 0, expired: 0 };
   let paidCents = 0;
@@ -171,7 +218,7 @@ export async function getOverview() {
   // Deployment breakdowns
   const deploymentsByPayment = {};
   let activeHosting = 0, pendingHosting = 0, failedHosting = 0, suspendedHosting = 0;
-  let freeHosting = 0, paidHosting = 0, promoHosting = 0;
+  let freeHosting = 0, paidHosting = 0;
   for (const d of deployments) {
     const k = d.paymentStatus || 'none';
     deploymentsByPayment[k] = (deploymentsByPayment[k] || 0) + 1;
@@ -182,12 +229,11 @@ export async function getOverview() {
     else if (s === 'suspended' || s === 'account_suspended') suspendedHosting++;
     if (d.paymentStatus === 'paid') paidHosting++;
     else freeHosting++;
-    if (d.billingTierId === 'promo_50') promoHosting++;
   }
 
   return {
     users,
-    userBreakdown: { active: activeUsers, suspended: suspendedUsers, disabled: disabledUsers, deleted: deletedUsers, promo: promoUsers },
+    userBreakdown: { active: activeUsers, suspended: suspendedUsers, disabled: disabledUsers, deleted: deletedUsers },
     deployments: {
       total: deployments.length,
       active: activeHosting,
@@ -196,7 +242,6 @@ export async function getOverview() {
       suspended: suspendedHosting,
       free: freeHosting,
       paid: paidHosting,
-      promo: promoHosting,
       byPaymentStatus: deploymentsByPayment,
     },
     orders: {
@@ -209,13 +254,6 @@ export async function getOverview() {
     },
     receipts: { pending: receiptsPending },
     cleanupJobs,
-    promo: {
-      limit: promo.limit,
-      used: promo.used,
-      remaining: promo.remaining,
-      paidPromo: promo.paidPromo,
-      paidStandard: promo.paidStandard,
-    },
     revenue: { paidCents, currency: paidCurrency, paidDisplay: `${paidCurrency} ${(paidCents / 100).toFixed(2)}` },
     // Internal only: provider cost + platform margin. Currencies differ (customer
     // pays PGK, Render cost tracked in its own currency) so they are NOT mixed.
@@ -260,6 +298,30 @@ export async function listDeployments(ownerUserId = null) {
 
 export async function listOrders() {
   return billingRepo.listAdminDeploymentOrders();
+}
+
+export async function listVpsServices(ownerUserId = null) {
+  const [records, users] = await Promise.all([
+    vpsRepo.listAllForAdmin(),
+    adminUserRepo.listUsers(),
+  ]);
+  const accessRows = await serviceAccessRepo.listByServiceIds('vps', records.map((r) => r.id));
+  const accessByService = new Map(accessRows.map((row) => [row.serviceId, row]));
+  const usersById = new Map(users.map((u) => [u.id, u]));
+  const usersByClientId = new Map(users.map((u) => [u.clientId, u]).filter(([id]) => Boolean(id)));
+
+  return records
+    .map((record) => {
+      const access = accessByService.get(record.id) ?? null;
+      const userId = access?.userId || record.createdByUserId || null;
+      const customer = usersById.get(userId)
+        || usersById.get(record.organizationId)
+        || usersByClientId.get(record.organizationId)
+        || null;
+      return vpsAdminView(record, access, customer);
+    })
+    .filter((row) => !ownerUserId || row.userId === ownerUserId || row.customer?.id === ownerUserId)
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 }
 
 export async function listReceipts() {
@@ -313,6 +375,16 @@ export async function rejectReceipt(receiptId, adminUserId, note = null) {
   const order = receipt.checkoutOrder;
   if (order && order.status !== 'paid') {
     await billingRepo.updateOrder(order.id, { status: 'pending' });
+    await recordPaymentTransaction({
+      order,
+      provider: 'manual',
+      providerTransactionId: `receipt:${receipt.id}`,
+      status: 'failed',
+      receiptId: receipt.id,
+      failureCode: 'RECEIPT_REJECTED',
+      failureMessage: note ? String(note).slice(0, 500) : 'Manual payment receipt was rejected.',
+      metadata: { source: 'manual_receipt_review' },
+    });
     if (order.deploymentId) {
       const deployment = await findDeploymentRecord(order.deploymentId);
       if (deployment && deployment.paymentStatus !== 'paid') {
@@ -446,6 +518,11 @@ async function userDeployments(userId) {
   return (store.deployments || []).filter((d) => d.userId === userId);
 }
 
+async function userOwnershipScope(user) {
+  const discovered = await customerRepo.listOrganizationIdsForCustomer(user.id);
+  return resolveCustomerOwnershipScope(user, discovered);
+}
+
 /**
  * Suspend every active site a user owns (account-level suspend). Render services
  * are suspended (reversible); records are marked suspended with the account
@@ -460,20 +537,6 @@ async function cascadeSuspendUserDeployments(userId, reason) {
     if (d.renderServiceId && renderApiService.configured()) {
       try { await renderApiService.suspendService(d.renderServiceId); render = 'suspended'; }
       catch (err) { render = `error: ${err.message}`; }
-    }
-    let githubArchive = null;
-    const targetRoot = d.generatedSite?.githubTargetRoot || d.environmentConfiguration?.rootDirectory;
-    if (isGeneratedTemplateRoot(targetRoot)) {
-      try {
-        githubArchive = await archiveGeneratedSiteFolder({
-          repoUrl: d.repoUrl || d.githubRepo || d.environmentConfiguration?.sourceRepository,
-          branch: d.githubBranch || d.environmentConfiguration?.branch || 'main',
-          targetRoot,
-          reason: reason || 'account_deleted',
-        });
-      } catch (err) {
-        githubArchive = { attempted: true, error: err.message };
-      }
     }
     await updateDeploymentRecord(d.deploymentId, {
       status: 'suspended',
@@ -498,6 +561,7 @@ async function cascadeBringDownUserDeployments(userId, reason) {
     if (d.status === 'deleted' || d.recordStatus === 'deleted') continue;
     let render = 'skipped';
     let cleanupNeeded = false;
+    let githubArchive = null;
     if (d.renderServiceId && renderApiService.configured()) {
       try {
         await renderApiService.deleteService(d.renderServiceId);
@@ -506,6 +570,19 @@ async function cascadeBringDownUserDeployments(userId, reason) {
         try { await renderApiService.suspendService(d.renderServiceId); render = `suspended_delete_failed: ${err.message}`; }
         catch (err2) { render = `error: ${err2.message}`; }
         cleanupNeeded = true;
+      }
+    }
+    const targetRoot = d.generatedSite?.githubTargetRoot || d.environmentConfiguration?.rootDirectory;
+    if (isGeneratedTemplateRoot(targetRoot)) {
+      try {
+        githubArchive = await archiveGeneratedSiteFolder({
+          repoUrl: d.repoUrl || d.githubRepo || d.environmentConfiguration?.sourceRepository,
+          branch: d.githubBranch || d.environmentConfiguration?.branch || 'main',
+          targetRoot,
+          reason: reason || 'account_deleted',
+        });
+      } catch (err) {
+        githubArchive = { attempted: true, error: err.message };
       }
     }
     await updateDeploymentRecord(d.deploymentId, {
@@ -528,9 +605,21 @@ async function cascadeBringDownUserDeployments(userId, reason) {
 export async function suspendUser(userId, reason = null, adminUserId = null) {
   const user = await adminUserRepo.findUserById(userId);
   if (!user) throw httpError('User not found.', 404);
+  if (user.accountStatus === 'deleted') throw httpError('Deleted accounts cannot be suspended.', 409);
 
+  const scope = await userOwnershipScope(user);
   const updated = await adminUserRepo.suspendUser(userId, reason);
   await revokeUserRefreshTokens(userId);
+  await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    accessStatus: 'suspended',
+    adminStatus: 'blocked',
+    suspendedAt: new Date(),
+    suspendedReason: `account-suspended:${reason ? String(reason).slice(0, 900) : 'admin_suspended'}`,
+  }, { accessStatus: 'active' });
+  const serviceAccess = await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    adminStatus: 'blocked',
+    suspendedReason: `account-suspended:${reason ? String(reason).slice(0, 900) : 'admin_suspended'}`,
+  }, { accessStatus: { notIn: ['deleted', 'cancelled', 'expired'] } });
   const deployments = await cascadeSuspendUserDeployments(userId, reason || 'account_suspended');
 
   await writeAuditLog({
@@ -538,35 +627,62 @@ export async function suspendUser(userId, reason = null, adminUserId = null) {
     action: 'admin.user.suspended',
     entityType: 'user',
     entityId: userId,
-    result: { reason: reason || 'admin_suspended', deployments: deployments.length },
+    result: { reason: reason || 'admin_suspended', deployments: deployments.length, serviceAccess: serviceAccess.count },
   });
 
-  return { ...userView(updated), deployments };
+  return lifecycleResult(updated, { serviceAccess, hosting: deployments });
 }
 
 export async function disableUser(userId, reason = null, adminUserId = null) {
   const user = await adminUserRepo.findUserById(userId);
   if (!user) throw httpError('User not found.', 404);
+  if (user.accountStatus === 'deleted') throw httpError('Deleted accounts cannot be disabled.', 409);
 
+  const scope = await userOwnershipScope(user);
   const updated = await adminUserRepo.disableUser(userId, reason);
   await revokeUserRefreshTokens(userId);
+  const serviceAccess = await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    adminStatus: 'blocked',
+    suspendedReason: `account-disabled:${reason ? String(reason).slice(0, 900) : 'admin_disabled'}`,
+  }, { accessStatus: { notIn: ['deleted', 'cancelled'] } });
 
   await writeAuditLog({
     actorUserId: adminUserId,
     action: 'admin.user.disabled',
     entityType: 'user',
     entityId: userId,
-    result: { reason: reason || 'admin_disabled' },
+    result: { reason: reason || 'admin_disabled', serviceAccess: serviceAccess.count },
   });
 
-  return userView(updated);
+  return lifecycleResult(updated, { serviceAccess });
 }
 
 export async function reactivateUser(userId, adminUserId = null, { resumeDeployments = false } = {}) {
   const user = await adminUserRepo.findUserById(userId);
   if (!user) throw httpError('User not found.', 404);
+  if (user.accountStatus === 'deleted') throw httpError('Deleted accounts cannot be reactivated.', 409);
 
+  const scope = await userOwnershipScope(user);
   const updated = await adminUserRepo.reactivateUser(userId);
+  const resumedAccess = await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    accessStatus: 'active',
+    adminStatus: 'allowed',
+    suspendedReason: null,
+    suspendedAt: null,
+  }, {
+    accessStatus: 'suspended',
+    billingStatus: { in: ['trial', 'paid', 'free'] },
+    suspendedReason: { startsWith: 'account-' },
+  });
+  const unblockedAccess = await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    adminStatus: 'allowed',
+    suspendedReason: null,
+    suspendedAt: null,
+  }, {
+    accessStatus: { notIn: ['deleted', 'cancelled', 'expired', 'suspended'] },
+    suspendedReason: { startsWith: 'account-' },
+  });
+  const serviceAccess = { count: resumedAccess.count + unblockedAccess.count };
 
   // Optionally resume the user's suspended sites (only those suspended at the
   // account level — never auto-revive account_deleted sites).
@@ -574,7 +690,7 @@ export async function reactivateUser(userId, adminUserId = null, { resumeDeploym
   if (resumeDeployments) {
     const deployments = await userDeployments(userId);
     for (const d of deployments) {
-      if (d.status !== 'suspended') continue;
+      if (d.status !== 'suspended' || !d.accountSuspendedAt) continue;
       let render = 'skipped';
       if (d.renderServiceId && renderApiService.configured()) {
         try { await renderApiService.resumeService(d.renderServiceId); render = 'resumed'; }
@@ -595,10 +711,10 @@ export async function reactivateUser(userId, adminUserId = null, { resumeDeploym
     action: 'admin.user.reactivated',
     entityType: 'user',
     entityId: userId,
-    result: { resumeDeployments, resumed: resumed.length },
+    result: { resumeDeployments, resumed: resumed.length, serviceAccess: serviceAccess.count },
   });
 
-  return { ...userView(updated), resumed };
+  return lifecycleResult(updated, { serviceAccess, hosting: resumed });
 }
 
 /**
@@ -630,15 +746,12 @@ async function purgeUserHostingDeployments(userId) {
 }
 
 /**
- * Hard-delete a client account from the main database.
+ * Soft-delete a client account while preserving financial, service and audit history.
  *
- * Admin delete in the dashboard is permanent for customer (non-admin) accounts:
+ * Admin delete for customer accounts:
  *  1) bring down Render/hosting for their sites
- *  2) purge user-owned Prisma rows
- *  3) delete the User row itself
- *
- * Soft-delete is intentionally not used for admin "Delete" — soft-deleted users
- * still blocked login and cluttered the DB (see Local Admin recovery incident).
+ *  2) suspend service access without rewriting expired/deleted states
+ *  3) preserve the user and owned records for oversight history
  * Admin accounts cannot be deleted here (protect operator access).
  */
 export async function deleteUser(userId, reason = null, adminUserId = null) {
@@ -653,44 +766,36 @@ export async function deleteUser(userId, reason = null, adminUserId = null) {
   }
 
   const why = reason ? String(reason).slice(0, 1000) : 'account_deleted';
-  const snapshot = userView(user);
 
-  // 1) Force logout + take sites offline (provider best-effort).
+  const scope = await userOwnershipScope(user);
   await revokeUserRefreshTokens(userId);
+  const updated = await adminUserRepo.softDeleteUser(userId, why);
+  const serviceAccess = await serviceAccessRepo.updateManyByCustomerScope(scope, {
+    adminStatus: 'blocked',
+    accessStatus: 'suspended',
+    suspendedAt: new Date(),
+    suspendedReason: `account-deleted:${why}`,
+  }, { accessStatus: { notIn: ['deleted', 'cancelled', 'expired'] } });
   const deployments = await cascadeBringDownUserDeployments(userId, why);
-
-  // 2) Purge related main-DB rows, then the user row itself.
-  const cleaned = await purgeUserOwnedPrismaRows(userId);
-  await adminUserRepo.deleteUser(userId);
-
-  // 3) Drop hosting-store ownership for this user.
-  const hosting = await purgeUserHostingDeployments(userId);
 
   await writeAuditLog({
     actorUserId: adminUserId,
-    action: 'admin.user.hard_deleted',
+    action: 'admin.user.soft_deleted',
     entityType: 'user',
     entityId: userId,
     result: {
       reason: why,
-      hardDelete: true,
-      email: snapshot.email,
-      name: snapshot.name,
-      deployments: deployments.length,
-      hostingRemoved: hosting.removed,
-      cleaned,
+      hardDelete: false,
+      email: user.email,
+      name: user.name,
+      serviceAccess: serviceAccess.count,
     },
   });
 
   return {
+    ...lifecycleResult(updated, { serviceAccess, hosting: deployments, billing: { preserved: true } }),
     deleted: true,
-    hardDelete: true,
-    id: userId,
-    email: snapshot.email,
-    name: snapshot.name,
-    deployments,
-    hosting,
-    cleaned,
+    hardDelete: false,
   };
 }
 
@@ -891,7 +996,7 @@ export function getConfigStatus() {
       repoUrl: process.env.RENDER_GENERATED_SITES_REPO_URL || null,
     },
     spaceship: {
-      configured: bool(process.env.SPACESHIP_API_KEY) && bool(process.env.SPACESHIP_SECRET),
+      configured: bool(process.env.SPACESHIP_API_KEY) && bool(process.env.SPACESHIP_API_SECRET),
     },
     database: {
       url: process.env.DATABASE_URL ? `…configured` : 'NOT SET',
@@ -899,7 +1004,6 @@ export function getConfigStatus() {
     billing: {
       currency: process.env.BILLING_CURRENCY || 'PGK',
       markupPercent: Number(process.env.PLATFORM_MARKUP_PERCENT || 30),
-      promoLimit: Number(process.env.DEPLOYMENT_PROMO_SIGNUP_LIMIT || 20),
       manualBankEnabled: bool(process.env.MANUAL_BANK_ACCOUNT_NAME) || bool(process.env.MANUAL_BANK_DETAILS),
       bankDetails: process.env.MANUAL_BANK_ACCOUNT_NAME || null,
     },
@@ -933,6 +1037,7 @@ export default {
   getOverview,
   listUsers,
   listDeployments,
+  listVpsServices,
   listOrders,
   listReceipts,
   approveReceipt,

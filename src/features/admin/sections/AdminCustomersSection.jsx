@@ -26,33 +26,29 @@ function AdminAvatar({ user, size = 28 }) {
   return <Avatar name={user?.name || user?.email || ''} imageUrl={url} size={size} />;
 }
 
-function PromoCell({ user }) {
-  if (user.promoClaimedAt) {
-    return (
-      <span style={{ color: 'var(--accent)', fontSize: 12 }} title={`Claimed ${when(user.promoClaimedAt)}`}>
-        <ICN.Tag size={11} /> claimed{user.promoSignupRank ? ` · #${user.promoSignupRank}` : ''}
-      </span>
-    );
-  }
-  if (user.promoEligible) {
-    return <span className="muted" style={{ fontSize: 12 }}>eligible{user.promoSignupRank ? ` · #${user.promoSignupRank}` : ''}</span>;
-  }
-  return <span className="muted" style={{ fontSize: 12 }}>—</span>;
-}
-
-export function AdminCustomersSection({ users, deployments, orders, receipts, busyId, onAct, onView }) {
+export function AdminCustomersSection({ users, deployments, vpsServices = [], orders, receipts, busyId, onAct, onView }) {
   const depByUser = buildDeploymentsByUserId(deployments);
   const ordersByDep = buildOrdersByDeploymentId(orders);
   const receiptsByOrder = buildReceiptsByOrderId(receipts);
 
   const rows = users.map((u) => {
     const userDeps = depByUser[u.id] || [];
+    const userVps = vpsServices.filter((svc) => svc.userId === u.id || svc.customer?.id === u.id);
     const activeDeps = userDeps.filter((d) => d.status === 'live' || d.status === 'active').length;
+    const activeVps = userVps.filter((svc) => ['active', 'running'].includes(String(svc.status || '').toLowerCase())).length;
     const userOrders = userDeps.flatMap((d) => ordersByDep[d.deploymentId] || []);
     const paidOrders = userOrders.filter((o) => o.status === 'paid');
     const totalSpent = paidOrders.reduce((s, o) => s + (o.totalAmountCents || 0), 0);
     const currency = paidOrders[0]?.currency || 'PGK';
-    return { user: u, sites: userDeps.length, activeDeps, paidBills: paidOrders.length, totalSpent, currency };
+    return {
+      user: u,
+      sites: userDeps.length,
+      vps: userVps.length,
+      activeServices: activeDeps + activeVps,
+      paidBills: paidOrders.length,
+      totalSpent,
+      currency,
+    };
   });
 
   const inactive = (u) => ['suspended', 'disabled', 'deleted'].includes(u.accountStatus);
@@ -68,36 +64,40 @@ export function AdminCustomersSection({ users, deployments, orders, receipts, bu
               <th>Name</th>
               <th>Role</th>
               <th>Status</th>
+              <th>Services</th>
               <th>Sites</th>
+              <th>VPS</th>
               <th>Active</th>
               <th>Paid Bills</th>
               <th>Total Spent</th>
-              <th>Promo</th>
               <th>Created</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={12} className="muted" style={{ padding: 20 }}>No users found.</td></tr>
+              <tr><td colSpan={13} className="muted" style={{ padding: 20 }}>No users found.</td></tr>
             )}
-            {rows.map(({ user: u, sites, activeDeps, paidBills, totalSpent, currency }) => (
+            {rows.map(({ user: u, sites, vps, activeServices, paidBills, totalSpent, currency }) => (
               <tr key={u.id}>
                 <td style={{ width: 40 }}><AdminAvatar user={u} /></td>
                 <td style={{ fontSize: 12 }}>{u.email}</td>
                 <td style={{ fontSize: 12 }}>{u.name || '—'}</td>
                 <td><StatusPill value={u.role || 'user'} /></td>
                 <td><StatusPill value={u.accountStatus || 'active'} /></td>
+                <td className="mono">{sites + vps}</td>
                 <td className="mono">{sites}</td>
-                <td className="mono">{activeDeps}</td>
+                <td className="mono">{vps}</td>
+                <td className="mono">{activeServices}</td>
                 <td className="mono">{paidBills}</td>
                 <td style={{ fontSize: 12 }}>{totalSpent > 0 ? money(totalSpent, currency) : '—'}</td>
-                <td><PromoCell user={u} /></td>
                 <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{when(u.createdAt)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <div className="admin-action-row">
                     <button className="btn btn-sm btn-outline" onClick={() => onView(u.id)}>View</button>
-                    {inactive(u) ? (
+                    {u.accountStatus === 'deleted' ? (
+                      <span className="muted" style={{ fontSize: 11 }}>History preserved</span>
+                    ) : inactive(u) ? (
                       <button className="btn btn-sm btn-primary" disabled={busyId === u.id}
                         onClick={() => onAct(u.id, () => reactivateUser(u.id, false), 'Reactivate')}>
                         Reactivate
@@ -198,9 +198,6 @@ export function UserDetailDrawer({ userId, onClose }) {
                   <div className="row" style={{ marginBottom: 4, gap: 6 }}><b>Account:</b> <StatusPill value={u.accountStatus} /></div>
                   <div className="row" style={{ marginBottom: 4, gap: 6 }}><b>Role:</b> <StatusPill value={u.role} /></div>
                   <div style={{ marginBottom: 4 }}><b>Created:</b> {when(u.createdAt)}</div>
-                  {u.promoClaimedAt && (
-                    <div style={{ marginBottom: 4 }}><b>Promo claimed:</b> {when(u.promoClaimedAt)}</div>
-                  )}
                   {u.disabledReason && (
                     <div style={{ marginBottom: 4, color: 'var(--danger)' }}><b>Disabled reason:</b> {u.disabledReason}</div>
                   )}

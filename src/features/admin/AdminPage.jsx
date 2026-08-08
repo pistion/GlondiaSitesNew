@@ -6,6 +6,7 @@ import {
   getAdminOverview,
   listAdminUsers,
   listAdminDeployments,
+  listAdminVpsServices,
   listAdminOrders,
   listAdminReceipts,
   getAdminActivity,
@@ -45,6 +46,7 @@ export function AdminPage() {
   const [overview, setOverview]       = useState(null);
   const [users, setUsers]             = useState([]);
   const [deployments, setDeployments] = useState([]);
+  const [vpsServices, setVpsServices] = useState([]);
   const [orders, setOrders]           = useState([]);
   const [receipts, setReceipts]       = useState([]);
   const [activity, setActivity]       = useState([]);
@@ -59,10 +61,11 @@ export function AdminPage() {
   const refresh = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const [ov, us, dep, ord, rec, act, cfg] = await Promise.all([
+      const [ov, us, dep, vps, ord, rec, act, cfg] = await Promise.all([
         getAdminOverview(),
         listAdminUsers(),
         listAdminDeployments(),
+        listAdminVpsServices(),
         listAdminOrders(),
         listAdminReceipts(),
         getAdminActivity({ limit: 200 }).catch(() => []),
@@ -71,6 +74,7 @@ export function AdminPage() {
       setOverview(ov);
       setUsers(us || []);
       setDeployments(dep || []);
+      setVpsServices(vps || []);
       setOrders(ord || []);
       setReceipts(rec || []);
       setActivity(act || []);
@@ -209,6 +213,7 @@ export function AdminPage() {
         <AdminOverviewSection
           overview={overview}
           deployments={deployments}
+          vpsServices={vpsServices}
           orders={orders}
           receipts={receipts}
           users={users}
@@ -230,6 +235,7 @@ export function AdminPage() {
       {!loading && tab === 'hosting' && (
         <AdminHostingTabs
           deployments={deployments}
+          vpsServices={vpsServices}
           users={users}
           orders={orders}
           busyId={busyId}

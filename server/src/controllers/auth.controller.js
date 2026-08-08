@@ -66,7 +66,9 @@ const AuthController = {
   me: async (req, res, next) => {
     try {
       const user = await getUserById(req.user?.id);
-      if (!user) return res.error('NOT_FOUND', 'User not found.', 404);
+      if (!user) {
+        return res.error('UNAUTHENTICATED', 'Your session no longer matches an account. Please sign in again.', 401);
+      }
       res.ok({ user });
     } catch (error) {
       next(error);
@@ -77,7 +79,9 @@ const AuthController = {
   getProfile: async (req, res, next) => {
     try {
       const profile = await getUserProfile(req.user?.id);
-      if (!profile) return res.error('NOT_FOUND', 'User not found.', 404);
+      if (!profile) {
+        return res.error('UNAUTHENTICATED', 'Your session no longer matches an account. Please sign in again.', 401);
+      }
       res.ok({ profile });
     } catch (error) {
       next(error);

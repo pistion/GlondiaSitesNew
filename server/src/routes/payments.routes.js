@@ -19,13 +19,21 @@ import { writeAuditLog } from '../services/auditLogService.js';
 import { updateDeploymentRecord } from '../glondia-engines/00-SHARED/deploymentRecordStore.js';
 import { findDeploymentRecord, createDeploymentRenewalOrder } from '../services/deploymentBillingService.js';
 import { readHostingStore } from '../services/hostingStore.js';
-import { deploymentBilling, billingTiers, graceHours, initialRenderPlan, getBillingTier } from '../config/deploymentBilling.js';
-import { getPromoUsage, getUserPromoStatus, resolveRequestedBillingTier } from '../services/deploymentPromoService.js';
+import { initialRenderPlan } from '../config/hostingLifecycle.js';
 import { createUserNotification, createAdminNotification } from '../services/notificationService.js';
 import {
   createDeploymentPaypalOrder,
   captureDeploymentPaypalOrder,
+  payDeploymentWithSavedMethod,
 } from '../services/deploymentPaypalService.js';
+import {
+  listPaymentMethodsForUser,
+  setDefaultPaymentMethod,
+  removePaymentMethod,
+  createPaypalVaultSetup,
+  completePaypalVaultSetup,
+} from '../services/paymentMethodService.js';
+import { paymentLifecycleMiddleware } from '../middleware/billing.middleware.js';
 
 const router = express.Router();
 
@@ -79,45 +87,12 @@ const upload = multer({
 
 router.use(authMiddleware);
 
-// ── Launch pricing + promo availability (for the deploy tier selector) ───────
-router.get('/pricing', async (req, res, next) => {
-  try {
-    const [promo, userPromo] = await Promise.all([
-      getPromoUsage(),
-      getUserPromoStatus(req.user?.id),
-    ]);
-    const tiers = Object.values(billingTiers).map((t) => ({
-      id: t.id,
-      label: t.label,
-      amount: t.amount,
-      amountCents: t.amountCents,
-      currency: t.currency,
-      displayAmount: `K${t.amount}`,
-      promo: t.promo === true,
-      renderPlanAfterPayment: t.renderPlanAfterPayment,
-      // The promo tier is selectable only when THIS user can still claim it.
-      available: t.promo ? userPromo.canClaim : true,
-    }));
-    res.json({
-      data: {
-        tiers,
-        graceHours,
-        initialRenderPlan,
-        // Global stats (admin/analytics) + this user's promo eligibility.
-        promo: { limit: promo.limit, used: promo.used, remaining: promo.remaining, available: promo.available },
-        userPromo,
-      },
-      requestId: req.id,
-    });
-  } catch (error) { next(error); }
-});
-
-// ── Per-user billing summary (promo + pricing + orders + deployments) ────────
+// ── Per-user billing summary (pricing + orders + deployments) ────────────────
 router.get('/billing-summary', async (req, res, next) => {
   try {
     const userId = req.user?.id;
     const isAdmin = req.user?.role === 'admin';
-    const promo = await getUserPromoStatus(userId);
+    const paymentMethods = await listPaymentMethodsForUser(userId);
 
     // Normal users see only their own orders/deployments; admins see all.
     const orderWhere = isAdmin
@@ -138,158 +113,37 @@ router.get('/billing-summary', async (req, res, next) => {
         serviceName: d.serviceName || null,
         status: d.status || null,
         paymentStatus: d.paymentStatus || 'none',
-        billingTierId: d.billingTierId || null,
-        billingTierLabel: d.billingTierLabel || null,
-        promoApplied: d.promoApplied === true,
-        promoClaimStatus: d.promoClaimStatus || null,
         priceCents: d.priceCents ?? null,
         priceCurrency: d.priceCurrency || null,
         checkoutOrderId: d.checkoutOrderId || null,
         billingDueAt: d.billingDueAt || null,
         trialStartedAt: d.trialStartedAt || null,
         trialEndsAt: d.trialEndsAt || d.billingDueAt || null,
-        subscriptionStatus: d.subscriptionStatus || null,
-        currentPeriodStart: d.currentPeriodStart || null,
-        currentPeriodEnd: d.currentPeriodEnd || null,
-        nextBillingAt: d.nextBillingAt || null,
-        renewalReminderAt: d.renewalReminderAt || null,
-        lastPaidAt: d.lastPaidAt || null,
-        renewalCount: d.renewalCount ?? null,
         paidAt: d.paidAt || null,
         renderPlan: d.renderPlan || null,
         liveUrl: d.liveUrl || null,
       }));
 
-    const promoTier = getBillingTier('promo_50');
-    const standardTier = getBillingTier('standard_200');
-
     res.json({
       data: {
-        promo,
-        pricing: {
-          promo: { amount: promoTier.amount, currency: promoTier.currency, displayAmount: `K${promoTier.amount}` },
-          standard: { amount: standardTier.amount, currency: standardTier.currency, displayAmount: `K${standardTier.amount}` },
-        },
-        graceHours,
         initialRenderPlan,
         orders,
         deployments,
+        paymentMethods,
       },
       requestId: req.id,
     });
   } catch (error) { next(error); }
 });
 
-// ── Apply/change the billing tier on a pending deployment order ───────────────
-// Lets a user deploy first, then choose K50/K200 in billing. Eligibility is
-// re-verified server-side; the frontend is never trusted.
+// ── Create a standard hosting renewal order ──────────────────────────────────
 router.post('/deployments/:deploymentId/renew', async (req, res, next) => {
   try {
     const result = await createDeploymentRenewalOrder({
       deploymentId: req.params.deploymentId,
       user: req.user,
-      billingTierId: req.body?.billingTierId || null,
     });
     res.status(201).json({ data: result, requestId: req.id });
-  } catch (error) { next(error); }
-});
-
-router.post('/deployment-orders/:orderId/apply-tier', async (req, res, next) => {
-  try {
-    const requestedTierId = String(req.body?.billingTierId || '').trim();
-    if (!['promo_50', 'standard_200'].includes(requestedTierId)) {
-      return res.status(400).json({ success: false, error: { code: 'INVALID_TIER', message: 'billingTierId must be promo_50 or standard_200.' }, requestId: req.id });
-    }
-
-    const order = await prisma.checkoutOrder.findUnique({ where: { id: req.params.orderId } });
-    if (!order || order.type !== 'deployment') {
-      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Deployment order not found.' }, requestId: req.id });
-    }
-    const isAdmin = req.user?.role === 'admin';
-    if (!isAdmin && order.userId && order.userId !== req.user?.id) {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'This order belongs to another account.' }, requestId: req.id });
-    }
-    if (order.status !== 'pending') {
-      return res.status(409).json({ success: false, error: { code: 'ORDER_NOT_PENDING', message: `Only pending orders can change tier (current: ${order.status}).` }, requestId: req.id });
-    }
-
-    const ownerId = order.userId || req.user?.id;
-    const { tier, promoApplied, promoStatus, switched, message, promoWillBeMarkedUsedOnPayment } =
-      await resolveRequestedBillingTier({ userId: ownerId, requestedTierId, deploymentId: order.deploymentId });
-
-    const meta = (() => { try { return JSON.parse(order.metadata || '{}'); } catch { return {}; } })();
-    await prisma.checkoutOrder.update({
-      where: { id: order.id },
-      data: {
-        currency: tier.currency,
-        actualAmountCents: tier.amountCents,
-        totalAmountCents: tier.amountCents,
-        metadata: JSON.stringify({
-          ...meta,
-          billingTierId: tier.id,
-          billingTierLabel: tier.label,
-          promoApplied,
-          promoClaimForUserId: promoApplied ? (order.userId || null) : null,
-          promoWillBeMarkedUsedOnPayment: promoWillBeMarkedUsedOnPayment === true,
-          renderPlanAfterPayment: tier.renderPlanAfterPayment,
-          display: { amount: tier.amount, currency: tier.currency },
-        }),
-      },
-    });
-
-    if (order.deploymentId) {
-      const deployment = await findDeploymentRecord(order.deploymentId);
-      if (deployment) {
-        await updateDeploymentRecord(order.deploymentId, {
-          billingTierId: tier.id,
-          billingTierLabel: tier.label,
-          promoApplied,
-          promoClaimStatus: promoApplied ? 'pending' : (promoStatus?.used ? 'used' : (promoStatus?.eligible ? 'not_applicable' : 'unavailable')),
-          priceCents: tier.amountCents,
-          priceCurrency: tier.currency,
-          renderPlanTargetAfterPayment: tier.renderPlanAfterPayment,
-        });
-      }
-    }
-
-    await writeAuditLog({
-      organizationId: order.organizationId,
-      actorUserId: req.user?.id !== 'local-user' ? req.user?.id : null,
-      action: 'deployment.billing.tier_applied',
-      entityType: 'checkout_order',
-      entityId: order.id,
-      result: { requestedTierId, appliedTierId: tier.id, promoApplied, switched },
-    });
-
-    // Selecting the K50 promo is NOT payment — it only opens a pending claim.
-    // promoClaimedAt stays null until a verified payment runs markDeploymentPaid.
-    if (requestedTierId === 'promo_50') {
-      await writeAuditLog({
-        organizationId: order.organizationId,
-        actorUserId: req.user?.id !== 'local-user' ? req.user?.id : null,
-        action: promoApplied ? 'deployment.billing.promo_claim_pending' : 'deployment.billing.promo_selected',
-        entityType: 'checkout_order',
-        entityId: order.id,
-        result: { appliedTierId: tier.id, promoApplied, switched, message },
-      });
-    }
-
-    res.json({
-      data: {
-        orderId: order.id,
-        billingTierId: tier.id,
-        billingTierLabel: tier.label,
-        amount: tier.amount,
-        amountCents: tier.amountCents,
-        currency: tier.currency,
-        displayAmount: `K${tier.amount}`,
-        promoApplied,
-        switched,
-        message,
-        promo: promoStatus,
-      },
-      requestId: req.id,
-    });
   } catch (error) { next(error); }
 });
 
@@ -338,8 +192,8 @@ router.post('/manual-receipts', upload.single('receipt'), async (req, res, next)
         filePath: req.file.path,
         fileType: req.file.mimetype || null,
         fileSize: req.file.size || 0,
-        amountCents: order.totalAmountCents || deploymentBilling.amountCents,
-        currency: order.currency || deploymentBilling.currency,
+        amountCents: order.totalAmountCents,
+        currency: order.currency,
         status: 'pending',
         note: req.body?.note ? String(req.body.note).slice(0, 1000) : null,
       },
@@ -405,14 +259,83 @@ router.post('/paypal/orders', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/paypal/orders/:paypalOrderId/capture', async (req, res, next) => {
+router.post(
+  '/paypal/orders/:paypalOrderId/capture',
+  paymentLifecycleMiddleware({ provider: 'paypal', source: 'paypal_capture' }),
+  async (req, res, next) => {
   try {
     const result = await captureDeploymentPaypalOrder({
       paypalOrderId: req.params.paypalOrderId,
       user: req.user,
     });
     res.json({ data: result, requestId: req.id });
+  } catch (error) {
+    await req.billing?.fail(error, { providerOrderId: req.params.paypalOrderId });
+    next(error);
+  }
+});
+
+// Saved PayPal/card methods (vaulted by PayPal, display-safe only here).
+router.get('/payment-methods', async (req, res, next) => {
+  try {
+    res.json({ data: await listPaymentMethodsForUser(req.user?.id), requestId: req.id });
   } catch (error) { next(error); }
+});
+
+router.post('/payment-methods/:paymentMethodId/default', async (req, res, next) => {
+  try {
+    const result = await setDefaultPaymentMethod(req.user?.id, req.params.paymentMethodId);
+    res.json({ data: result, requestId: req.id });
+  } catch (error) { next(error); }
+});
+
+router.delete('/payment-methods/:paymentMethodId', async (req, res, next) => {
+  try {
+    const result = await removePaymentMethod(req.user?.id, req.params.paymentMethodId);
+    res.json({ data: result, requestId: req.id });
+  } catch (error) { next(error); }
+});
+
+router.post('/payment-methods/paypal/setup', async (req, res, next) => {
+  try {
+    const result = await createPaypalVaultSetup({
+      user: req.user,
+      returnUrl: req.body?.returnUrl || null,
+      cancelUrl: req.body?.cancelUrl || null,
+      source: req.body?.source || 'paypal',
+    });
+    res.json({ data: result, requestId: req.id });
+  } catch (error) { next(error); }
+});
+
+router.post('/payment-methods/paypal/complete', async (req, res, next) => {
+  try {
+    const result = await completePaypalVaultSetup({
+      user: req.user,
+      setupTokenId: req.body?.setupTokenId || req.body?.token || null,
+    });
+    res.json({ data: result, requestId: req.id });
+  } catch (error) { next(error); }
+});
+
+router.post(
+  '/deployment-orders/:orderId/pay-saved-method',
+  paymentLifecycleMiddleware({ provider: 'paypal', source: 'saved_payment_method' }),
+  async (req, res, next) => {
+  try {
+    const result = await payDeploymentWithSavedMethod({
+      checkoutOrderId: req.params.orderId,
+      paymentMethodId: req.body?.paymentMethodId || null,
+      user: req.user,
+    });
+    res.json({ data: result, requestId: req.id });
+  } catch (error) {
+    await req.billing?.fail(error, {
+      checkoutOrderId: req.params.orderId,
+      paymentMethodId: req.body?.paymentMethodId || null,
+    });
+    next(error);
+  }
 });
 
 export default router;

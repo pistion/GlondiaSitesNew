@@ -43,11 +43,11 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  background: var(--accent-soft);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--accent-ink);
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 0;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -55,11 +55,7 @@
 }
 
 .acct-badge-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  display: none;
 }
 
 /* ── Flash messages ── */
@@ -95,6 +91,7 @@
 .acct-section {
   scroll-margin-top: 80px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
 }
 
 .acct-section:last-child {
@@ -107,11 +104,13 @@
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+  background: color-mix(in srgb, var(--bg-deep) 42%, transparent);
+  border-left: 3px solid var(--accent);
 }
 
 .acct-section-head h2 {
   margin: 0 0 3px;
-  font-size: 15.5px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text);
 }
@@ -125,6 +124,153 @@
 /* ── Setting rows ── */
 .acct-rows {
   display: grid;
+}
+
+.acct-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-deep) 22%, transparent);
+}
+
+.acct-summary-box {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.acct-summary-box strong {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acct-summary-box span {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acct-summary-k {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.acct-billing-overview {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(280px, 1fr);
+  gap: 14px;
+  padding: 16px 22px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-deep) 22%, transparent);
+}
+
+.acct-payment-method,
+.acct-billing-mini,
+.acct-saved-method-card,
+.acct-autopay-panel,
+.acct-billing-edit-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.acct-payment-method {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+}
+
+.acct-payment-brand {
+  height: 46px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #12305f, #1976d2);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.acct-payment-brand.compact {
+  width: 68px;
+  height: 42px;
+}
+
+.acct-payment-copy,
+.acct-billing-mini > div,
+.acct-saved-method-card > div:last-child,
+.acct-autopay-panel > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.acct-payment-copy strong,
+.acct-billing-mini strong,
+.acct-saved-method-card strong,
+.acct-autopay-panel strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acct-payment-copy span,
+.acct-billing-mini span,
+.acct-saved-method-card span,
+.acct-autopay-panel span {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.acct-payment-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.acct-payment-actions.right {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.acct-billing-mini {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  overflow: hidden;
+}
+
+.acct-billing-mini > div {
+  padding: 12px 14px;
+}
+
+.acct-billing-mini > div + div {
+  border-top: 1px solid var(--border);
 }
 
 .acct-row {
@@ -245,26 +391,22 @@
   cursor: not-allowed;
 }
 
-/* ── Status pill ── */
+/* ── Status text ── */
 .acct-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
 }
 
 .acct-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--text-faint);
-  flex-shrink: 0;
+  display: none;
 }
 
 .acct-status.on .acct-status-dot {
@@ -278,6 +420,437 @@
   background: color-mix(in srgb, var(--bg-deep) 35%, transparent);
   display: grid;
   gap: 12px;
+}
+
+.acct-billing-form {
+  gap: 18px;
+}
+
+.acct-billing-edit-section {
+  padding: 14px;
+}
+
+.acct-form-heading {
+  margin: 0 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.acct-card-note {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.acct-autopay-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: color-mix(in srgb, var(--bg-deep) 38%, transparent);
+}
+
+.acct-switch {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.acct-switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.acct-switch span {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 26%, var(--bg-deep));
+  border: 1px solid var(--border-strong);
+  transition: background .15s, border-color .15s;
+}
+
+.acct-switch span::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 2px;
+  top: 2px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  box-shadow: 0 1px 3px rgba(0,0,0,.22);
+  transition: transform .15s;
+}
+
+.acct-switch input:checked + span {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.acct-switch input:checked + span::after {
+  transform: translateX(18px);
+}
+
+.acct-saved-method-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  flex-wrap: wrap;
+}
+
+.acct-payment-sheet {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-elev) 96%, #fff), var(--bg-elev));
+  box-shadow: 0 10px 24px rgba(0,0,0,.06);
+}
+
+.acct-payment-sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.acct-payment-sheet-head h3 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.acct-payment-sheet-head p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.acct-secure-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.acct-security-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.acct-security-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.acct-security-row span::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.acct-pay-option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.acct-pay-option {
+  min-height: 86px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.acct-pay-option.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.acct-pay-option.muted {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.acct-pay-icon {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.acct-pay-option strong {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.acct-pay-form {
+  display: grid;
+  gap: 12px;
+}
+
+.acct-pay-field {
+  display: grid;
+  gap: 6px;
+}
+
+.acct-pay-field > span {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.acct-pay-field input,
+.acct-pay-hosted {
+  width: 100%;
+  height: 48px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text);
+  padding: 0 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.acct-pay-hosted {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 12px;
+}
+
+.acct-pay-hosted.inline {
+  border: 0;
+  min-width: 0;
+  box-shadow: none;
+}
+
+.acct-pay-hosted iframe {
+  min-height: 44px;
+}
+
+.acct-pay-field input:focus,
+.acct-pay-field input:hover,
+.acct-pay-hosted:focus-within,
+.acct-pay-hosted:hover {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.acct-pay-field-combo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding-right: 10px;
+}
+
+.acct-pay-field-combo:focus-within,
+.acct-pay-field-combo:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.acct-pay-field-combo input {
+  border: 0;
+  box-shadow: none !important;
+}
+
+.acct-pay-field-combo .acct-pay-hosted:hover,
+.acct-pay-field-combo .acct-pay-hosted:focus-within {
+  box-shadow: none;
+}
+
+.acct-card-badges {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.acct-card-badges b {
+  min-width: 38px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-deep) 44%, var(--bg-elev));
+  font-size: 10.5px;
+  font-weight: 900;
+}
+
+.acct-remember-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.acct-remember-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.acct-pay-continue {
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.acct-pay-continue:hover:not(:disabled) {
+  background: var(--accent-hover, #136943);
+}
+
+.acct-pay-continue:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.acct-pay-error {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #ef4444 9%, transparent);
+  color: var(--danger, #ef4444);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.acct-card-collection {
+  display: none;
+  grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.acct-card-visual {
+  min-height: 170px;
+  border-radius: 8px;
+  padding: 18px;
+  display: grid;
+  align-content: space-between;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,0) 42%),
+    linear-gradient(135deg, #172033, #245c7a);
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.16), 0 12px 24px rgba(0,0,0,.16);
+}
+
+.acct-card-chip {
+  width: 38px;
+  height: 28px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #f7d47a, #b58934);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.25);
+}
+
+.acct-card-number {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 17px;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  opacity: .9;
+}
+
+.acct-card-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.acct-card-fields .acct-input[readonly] {
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg-elev) 86%, var(--bg-deep));
+}
+
+.acct-card-fields .acct-input[readonly]:hover {
+  border-color: var(--accent);
+}
+
+.acct-card-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.acct-toggle-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.acct-toggle-line input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
 }
 
 .acct-form-grid {
@@ -310,6 +883,10 @@
   width: 100%;
   box-sizing: border-box;
   transition: border-color .1s, box-shadow .1s;
+}
+
+select.acct-input {
+  appearance: none;
 }
 
 .acct-input:focus {
@@ -382,6 +959,47 @@
 
 /* ── Responsive ── */
 @media (max-width: 680px) {
+  .acct-summary-grid {
+    grid-template-columns: 1fr;
+    padding: 12px 16px;
+  }
+  .acct-billing-overview {
+    grid-template-columns: 1fr;
+    padding: 12px 16px;
+  }
+  .acct-payment-method {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+  .acct-payment-actions.right {
+    margin-left: 0;
+    justify-content: flex-start;
+    width: 100%;
+  }
+  .acct-payment-sheet {
+    padding: 14px;
+  }
+  .acct-payment-sheet-head {
+    display: grid;
+  }
+  .acct-pay-option-grid {
+    grid-template-columns: 1fr;
+  }
+  .acct-pay-field-combo {
+    grid-template-columns: 1fr;
+    padding: 0 10px 10px;
+  }
+  .acct-card-badges {
+    padding-left: 4px;
+  }
+  .acct-card-collection {
+    grid-template-columns: 1fr;
+  }
+  .acct-card-visual {
+    min-height: 150px;
+  }
+  .acct-card-field-row {
+    grid-template-columns: 1fr;
+  }
   .acct-row {
     grid-template-columns: 1fr;
     gap: 8px;

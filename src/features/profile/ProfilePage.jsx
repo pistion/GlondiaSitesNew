@@ -15,9 +15,15 @@ import {
   uploadIdPhoto,
   changePassword,
 } from '../../api/profile.js';
-import { updateStoredAuthUser, logout } from '../../api/auth.js';
+import { updateStoredAuthUser, logout, clearAuthSession } from '../../api/auth.js';
+import {
+  listPaymentMethods,
+  createPayPalVaultSetup,
+  completePayPalVaultSetup,
+  getPayPalClientSettings,
+} from '../../api/payments.js';
 
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 const DETAIL_FIELDS = [
   { key: 'address',  label: 'Street Address' },
@@ -33,6 +39,18 @@ const DETAIL_FIELDS = [
   { key: 'timezone',               label: 'Timezone (e.g. Pacific/Port_Moresby)' },
 ];
 
+const BILLING_INVOICE_FIELDS = [
+  { key: 'billingName', label: 'Billing Name' },
+  { key: 'billingEmail', label: 'Billing Email', type: 'email' },
+  { key: 'companyName', label: 'Company' },
+  { key: 'currency', label: 'Invoice Currency', as: 'select', options: ['USD', 'PGK'] },
+];
+
+const RECURRING_BILLING_FIELDS = [
+  { key: 'country', label: 'Country' },
+  { key: 'billingCycle', label: 'Renewal Cadence', as: 'select', options: ['monthly', 'annual'] },
+];
+
 function initials(name) {
   if (!name) return '?';
   const parts = name.trim().split(/\s+/);
@@ -43,8 +61,50 @@ function fmt(val) {
   return val && String(val).trim() ? String(val).trim() : null;
 }
 
+function isEnabled(value) {
+  return value === true || String(value || '').toLowerCase() === 'true';
+}
+
+function loadPayPalCardFieldsSdk(clientId) {
+  if (!clientId) return Promise.reject(new Error('PayPal client ID is missing.'));
+  if (window.paypalCardVault?.CardFields) return Promise.resolve(window.paypalCardVault);
+
+  const existing = document.querySelector('script[data-glondia-paypal-card-fields="true"]');
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener('load', () => resolve(window.paypalCardVault), { once: true });
+      existing.addEventListener('error', () => reject(new Error('Could not load PayPal card fields.')), { once: true });
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD&components=card-fields`;
+    script.async = true;
+    script.dataset.glondiaPaypalCardFields = 'true';
+    script.dataset.namespace = 'paypalCardVault';
+    script.onload = () => {
+      if (window.paypalCardVault?.CardFields) resolve(window.paypalCardVault);
+      else reject(new Error('PayPal Card Fields are unavailable for this account.'));
+    };
+    script.onerror = () => reject(new Error('Could not load PayPal card fields.'));
+    document.head.appendChild(script);
+  });
+}
+
 export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThemeChange }) {
   const [profile, setProfile] = useState(null);
+  const [paymentMethods, setPaymentMethods] = useState([]);
+  const [paypalSettings, setPaypalSettings] = useState(null);
+  const [paypalSetupId, setPaypalSetupId] = useState('');
+  const cardFieldsRef = useRef(null);
+  const cardRenderedRef = useRef(false);
+  const cardNameRef = useRef(null);
+  const cardNumberRef = useRef(null);
+  const cardExpiryRef = useRef(null);
+  const cardCvvRef = useRef(null);
+  const [cardFieldsReady, setCardFieldsReady] = useState(false);
+  const [cardFieldsError, setCardFieldsError] = useState('');
   const [avatarUrl, setAvatarUrl] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -54,6 +114,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
   // field values for single-field edits
   const [fieldVal, setFieldVal] = useState('');
   const [detailsVal, setDetailsVal] = useState({});
+  const [billingVal, setBillingVal] = useState({});
   const [avatarFile, setAvatarFile] = useState(null);
   const [idFile, setIdFile] = useState(null);
 
@@ -68,6 +129,22 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
 
+  const handleSessionError = useCallback((error) => {
+    const message = String(error?.message || '');
+    const isSessionProblem =
+      error?.status === 401 ||
+      (error?.status === 404 && /user not found/i.test(message)) ||
+      /session no longer matches|user not found|real account is required|valid access token is required/i.test(message);
+    if (!isSessionProblem) return false;
+    clearAuthSession();
+    setProfile(null);
+    setEditing(null);
+    setMsg('');
+    setErr('Please sign in again to continue.');
+    navigate?.({ view: 'login' }, { replace: true });
+    return true;
+  }, [navigate]);
+
   // ── Data loading ──────────────────────────────────────────────────────────────
 
   const loadAvatar = useCallback(async () => {
@@ -80,18 +157,31 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
   const refresh = useCallback(async () => {
     setLoading(true); setErr('');
     try {
-      const p = await getProfile();
+      const [p, methods, paypal] = await Promise.all([
+        getProfile(),
+        listPaymentMethods().catch(() => []),
+        getPayPalClientSettings().catch(() => null),
+      ]);
       setProfile(p);
+      setPaymentMethods(Array.isArray(methods) ? methods : []);
+      setPaypalSettings(paypal);
       if (p.hasAvatar) await loadAvatar();
     } catch (e) {
+      if (handleSessionError(e)) return;
       setErr(e.message || 'Could not load your profile.');
     } finally {
       setLoading(false);
     }
-  }, [loadAvatar]);
+  }, [handleSessionError, loadAvatar]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => () => { if (avatarUrl) URL.revokeObjectURL(avatarUrl); }, [avatarUrl]);
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('glondia-paypal-setup-token') || '';
+      if (stored) setPaypalSetupId(stored);
+    } catch {}
+  }, []);
 
   // ── Edit helpers ──────────────────────────────────────────────────────────────
 
@@ -102,6 +192,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
     if (field === 'phone') setFieldVal(profile?.phone || '');
     if (field === 'org') setFieldVal(profile?.organizationName || profile?.profileDetails?.organizationName || '');
     if (field === 'details') setDetailsVal({ ...(profile?.profileDetails || {}) });
+    if (field === 'billing') setBillingVal({ ...(profile?.billingInfo || profile?.profileDetails?.billingInfo || {}) });
     if (field === 'password') setPwForm({ current: '', newPw: '', confirm: '' });
     if (field === 'email') setEmailForm({ newEmail: '', password: '' });
     if (field === 'delete') setDeleteForm({ confirm: '', password: '' });
@@ -113,6 +204,86 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
 
   const flash = (ok, m) => { if (ok) setMsg(m); else setErr(m); };
 
+  useEffect(() => {
+    if (editing !== 'billing') {
+      cardFieldsRef.current = null;
+      cardRenderedRef.current = false;
+      setCardFieldsReady(false);
+      setCardFieldsError('');
+      return undefined;
+    }
+    if (paypalSettings?.configured === false) {
+      setCardFieldsError('PayPal is not configured on the server.');
+      setCardFieldsReady(false);
+      return undefined;
+    }
+    if (!paypalSettings?.clientId) return undefined;
+    if (cardRenderedRef.current) return undefined;
+    if (!cardNameRef.current || !cardNumberRef.current || !cardExpiryRef.current || !cardCvvRef.current) return undefined;
+
+    let cancelled = false;
+    cardRenderedRef.current = true;
+    setCardFieldsReady(false);
+    setCardFieldsError('');
+
+    loadPayPalCardFieldsSdk(paypalSettings.clientId)
+      .then((paypal) => {
+        if (cancelled) return;
+        const cardFields = paypal.CardFields({
+          createVaultSetupToken: async () => {
+            const setup = await createPayPalVaultSetup({ source: 'card' });
+            if (!setup?.setupTokenId) throw new Error('PayPal did not return a card setup token.');
+            return setup.setupTokenId;
+          },
+          onApprove: async (data = {}) => {
+            const setupTokenId = data.vaultSetupToken || data.vault_setup_token || data.setupTokenId;
+            if (!setupTokenId) throw new Error('PayPal did not approve a vault setup token.');
+            const result = await completePayPalVaultSetup(setupTokenId);
+            const methods = await listPaymentMethods().catch(() => result?.paymentMethod ? [result.paymentMethod] : []);
+            if (!cancelled) {
+              setPaymentMethods(Array.isArray(methods) ? methods : []);
+              setCardFieldsReady(true);
+              flash(true, 'Card saved for future renewals.');
+            }
+          },
+          onError: (error) => {
+            if (!cancelled && !handleSessionError(error)) {
+              setCardFieldsError(error?.message || 'Could not save this card with PayPal.');
+            }
+          },
+          onCancel: () => {
+            if (!cancelled) setCardFieldsError('Card verification was cancelled.');
+          },
+        });
+
+        if (typeof cardFields.isEligible === 'function' && !cardFields.isEligible()) {
+          setCardFieldsError('PayPal Card Fields are not enabled for this account.');
+          setCardFieldsReady(false);
+          return;
+        }
+
+        cardFields.NameField().render(cardNameRef.current);
+        cardFields.NumberField().render(cardNumberRef.current);
+        cardFields.CVVField().render(cardCvvRef.current);
+        cardFields.ExpiryField().render(cardExpiryRef.current);
+        cardFieldsRef.current = cardFields;
+        setCardFieldsReady(true);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          cardRenderedRef.current = false;
+          setCardFieldsReady(false);
+          setCardFieldsError(error?.message || 'Could not load PayPal card fields.');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      cardFieldsRef.current = null;
+      cardRenderedRef.current = false;
+    };
+  }, [editing, paypalSettings?.clientId, paypalSettings?.configured, handleSessionError]);
+
   // ── Save handlers ─────────────────────────────────────────────────────────────
 
   const saveName = async () => {
@@ -123,7 +294,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       updateStoredAuthUser({ name: p.name });
       setEditing(null);
       flash(true, 'Name updated.');
-    } catch (e) { flash(false, e.message || 'Could not save name.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not save name.'); }
     finally { setBusy(''); }
   };
 
@@ -135,7 +306,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       updateStoredAuthUser({ phone: p.phone });
       setEditing(null);
       flash(true, 'Phone number updated.');
-    } catch (e) { flash(false, e.message || 'Could not save phone.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not save phone.'); }
     finally { setBusy(''); }
   };
 
@@ -147,7 +318,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       updateStoredAuthUser({ organizationName: p.organizationName });
       setEditing(null);
       flash(true, 'Organization name updated.');
-    } catch (e) { flash(false, e.message || 'Could not save organization name.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not save organization name.'); }
     finally { setBusy(''); }
   };
 
@@ -162,7 +333,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       setEditing(null);
       setEmailForm({ newEmail: '', password: '' });
       flash(true, 'Email address updated. Use the new address next time you sign in.');
-    } catch (e) { flash(false, e.message || 'Could not update email.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not update email.'); }
     finally { setBusy(''); }
   };
 
@@ -190,8 +361,92 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       setProfile(p);
       setEditing(null);
       flash(true, 'Contact details updated.');
-    } catch (e) { flash(false, e.message || 'Could not save details.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not save details.'); }
     finally { setBusy(''); }
+  };
+
+  const saveBilling = async () => {
+    setBusy('billing'); setErr('');
+    try {
+      const current = profile?.billingInfo || profile?.profileDetails?.billingInfo || {};
+      const {
+        paymentProvider,
+        paymentMethodId,
+        cardholderName,
+        cardBrand,
+        cardLast4,
+        cardExpMonth,
+        cardExpYear,
+        ...safeCurrent
+      } = current;
+      const p = await updateProfile({ billingInfo: { ...safeCurrent, ...billingVal } });
+      setProfile(p);
+      setEditing(null);
+      flash(true, 'Billing information updated.');
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not save billing information.'); }
+    finally { setBusy(''); }
+  };
+
+  const connectPayPal = async () => {
+    setBusy('paypal-setup'); setErr('');
+    try {
+      if (paypalSettings && paypalSettings.configured === false) {
+        throw new Error('PayPal is not configured on the server. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET, then restart the app.');
+      }
+      const here = window.location.href.split('#')[0].split('?')[0];
+      const setup = await createPayPalVaultSetup({
+        returnUrl: `${here}?paypalVault=approved`,
+        cancelUrl: `${here}?paypalVault=cancelled`,
+      });
+      if (!setup?.approvalUrl || !setup?.setupTokenId) throw new Error('PayPal did not return an approval link.');
+      setPaypalSetupId(setup.setupTokenId);
+      try { localStorage.setItem('glondia-paypal-setup-token', setup.setupTokenId); } catch {}
+      window.open(setup.approvalUrl, '_blank', 'noopener,noreferrer');
+      flash(true, 'Approve the PayPal connection, then return here and click Finish connection.');
+    } catch (e) {
+      if (!handleSessionError(e)) flash(false, e.message || 'Could not start PayPal connection.');
+    } finally { setBusy(''); }
+  };
+
+  const finishPayPalConnection = async () => {
+    const setupTokenId = paypalSetupId || (() => {
+      try { return localStorage.getItem('glondia-paypal-setup-token') || ''; } catch { return ''; }
+    })();
+    if (!setupTokenId) { setErr('Start PayPal connection first.'); return; }
+    setBusy('paypal-complete'); setErr('');
+    try {
+      const result = await completePayPalVaultSetup(setupTokenId);
+      const methods = await listPaymentMethods().catch(() => result?.paymentMethod ? [result.paymentMethod] : []);
+      setPaymentMethods(Array.isArray(methods) ? methods : []);
+      setPaypalSetupId('');
+      try { localStorage.removeItem('glondia-paypal-setup-token'); } catch {}
+      flash(true, 'PayPal is connected for saved payments and auto-renewal.');
+    } catch (e) {
+      if (!handleSessionError(e)) flash(false, e.message || 'Could not finish PayPal connection.');
+    } finally { setBusy(''); }
+  };
+
+  const saveCardWithPayPal = async () => {
+    setErr('');
+    setCardFieldsError('');
+    try {
+      if (paypalSettings?.configured === false) {
+        throw new Error('PayPal is not configured on the server.');
+      }
+      if (!cardFieldsRef.current) {
+        throw new Error(cardFieldsError || 'PayPal Card Fields are still loading.');
+      }
+      setBusy('paypal-card-submit');
+      await cardFieldsRef.current.submit();
+    } catch (e) {
+      if (!handleSessionError(e)) {
+        const message = e?.message || 'Could not save this card with PayPal.';
+        setCardFieldsError(message);
+        flash(false, message);
+      }
+    } finally {
+      setBusy('');
+    }
   };
 
   const saveAvatar = async () => {
@@ -204,7 +459,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       updateStoredAuthUser({ hasAvatar: true, avatarUrl: `/api/v1/auth/profile/avatar?t=${Date.now()}` });
       setEditing(null);
       flash(true, 'Profile photo updated.');
-    } catch (e) { flash(false, e.message || 'Upload failed.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Upload failed.'); }
     finally { setBusy(''); }
   };
 
@@ -216,7 +471,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       setProfile(p);
       setEditing(null);
       flash(true, 'ID photo uploaded.');
-    } catch (e) { flash(false, e.message || 'Upload failed.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Upload failed.'); }
     finally { setBusy(''); }
   };
 
@@ -229,7 +484,7 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
       setEditing(null);
       setPwForm({ current: '', newPw: '', confirm: '' });
       flash(true, 'Password updated successfully.');
-    } catch (e) { flash(false, e.message || 'Could not update password.'); }
+    } catch (e) { if (!handleSessionError(e)) flash(false, e.message || 'Could not update password.'); }
     finally { setBusy(''); }
   };
 
@@ -257,6 +512,24 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
     return parts.length ? parts.join(', ') : null;
   };
 
+  const billingSummary = () => {
+    const b = profile?.billingInfo || profile?.profileDetails?.billingInfo || {};
+    const method = paymentMethods.find((m) => m.isDefault) || paymentMethods[0] || null;
+    const name = b.billingName || b.companyName || profile?.organizationName || profile?.name;
+    const email = b.billingEmail || profile?.email;
+    return {
+      name: fmt(name) || 'Not set',
+      email: fmt(email) || 'Not set',
+      location: fmt(b.country),
+      currency: fmt(b.currency) || 'USD',
+      card: method?.label || 'No saved payment method',
+      cardExpiry: method?.expiryMonth && method?.expiryYear ? `${String(method.expiryMonth).padStart(2, '0')}/${method.expiryYear}` : null,
+      provider: method?.provider ? String(method.provider).replace(/^./, (c) => c.toUpperCase()) : 'PayPal',
+      hasSavedMethod: Boolean(method?.id),
+      recurring: isEnabled(b.recurringBillingEnabled) ? `${b.billingCycle || 'monthly'} recurring` : 'Manual billing',
+    };
+  };
+
   // ── Render ────────────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -268,6 +541,8 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
   }
 
   const currentTheme = themeProp || 'dark';
+  const billing = profile?.billingInfo || profile?.profileDetails?.billingInfo || {};
+  const billingView = billingSummary();
 
   return (
     <div className="acct-page">
@@ -444,6 +719,308 @@ export default function ProfilePage({ navigate, theme: themeProp = 'dark', onThe
               )}
             </div>
 
+          </div>
+        </div>
+
+        {/* Billing Information */}
+        <div className="acct-section" id="billing-info">
+          <div className="acct-section-head">
+            <div>
+              <h2>Billing</h2>
+              <p>Invoice profile, auto-renew settings, and saved PayPal payment method.</p>
+            </div>
+          </div>
+          <div className="acct-rows">
+            {editing !== 'billing' && (
+              <div className="acct-billing-overview">
+                <div className="acct-payment-method">
+                  <div className="acct-payment-brand">
+                    <span>{billingView.provider}</span>
+                  </div>
+                  <div className="acct-payment-copy">
+                    <div className="acct-summary-k">Saved Payment Method</div>
+                    <strong>{billingView.card}</strong>
+                    <span>{billingView.hasSavedMethod ? (billingView.cardExpiry ? `Expires ${billingView.cardExpiry}` : 'Ready for saved-method payments') : 'Pay once with PayPal to save a method securely.'}</span>
+                    <div className="acct-payment-actions">
+                      <button className="acct-btn primary" disabled={busy === 'paypal-setup'} onClick={connectPayPal}>
+                        {busy === 'paypal-setup' ? 'Opening...' : (billingView.hasSavedMethod ? 'Reconnect PayPal' : 'Connect PayPal')}
+                      </button>
+                      {paypalSetupId && (
+                        <button className="acct-btn" disabled={busy === 'paypal-complete'} onClick={finishPayPalConnection}>
+                          {busy === 'paypal-complete' ? 'Finishing...' : 'Finish connection'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="acct-billing-mini">
+                  <div>
+                    <div className="acct-summary-k">Invoice To</div>
+                    <strong>{billingView.name}</strong>
+                    <span>{billingView.email}</span>
+                  </div>
+                  <div>
+                    <div className="acct-summary-k">Auto-Renew</div>
+                    <strong>{billingView.recurring}</strong>
+                    <span>{billingView.currency}{billingView.location ? ` - ${billingView.location}` : ''}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="acct-row">
+              <div className="acct-row-label">Invoice Profile</div>
+              {editing !== 'billing' && (
+                <>
+                  <div className="acct-row-value">
+                    <strong>{billingView.name}</strong>
+                    <div className="acct-row-hint">{billingView.email}</div>
+                  </div>
+                  <button className="acct-btn" onClick={() => startEdit('billing')}>Edit</button>
+                </>
+              )}
+            </div>
+
+            {editing !== 'billing' && (
+              <>
+                <div className="acct-row">
+                  <div className="acct-row-label">Auto-Renew</div>
+                  <div className="acct-row-value">
+                    <strong>{billingView.recurring}</strong>
+                    <div className="acct-row-hint">{billingView.hasSavedMethod ? 'Charges active services with the saved PayPal payment method.' : 'Pay with PayPal once to save a method before enabling automatic renewal.'}</div>
+                  </div>
+                  <button className="acct-btn" onClick={() => startEdit('billing')}>Edit</button>
+                </div>
+                <div className="acct-row">
+                  <div className="acct-row-label">Saved Method</div>
+                  <div className="acct-row-value">
+                    <strong>{billingView.card}</strong>
+                    <div className="acct-row-hint">Connect or update the saved method through PayPal. This form never collects card numbers.</div>
+                  </div>
+                  <button className="acct-btn primary" disabled={busy === 'paypal-setup'} onClick={connectPayPal}>{billingView.hasSavedMethod ? 'Reconnect' : 'Connect'}</button>
+                </div>
+              </>
+            )}
+
+            {editing === 'billing' && (
+              <div className="acct-form-block acct-billing-form">
+                <div className="acct-billing-edit-section">
+                  <div className="acct-form-heading">Invoice Profile</div>
+                  <div className="acct-form-grid">
+                    {BILLING_INVOICE_FIELDS.map((f) => (
+                      <div key={f.key} className="acct-field">
+                        <label>{f.label}</label>
+                        {f.as === 'select' ? (
+                          <select
+                            className="acct-input"
+                            value={billingVal[f.key] || ''}
+                            onChange={(e) => setBillingVal({ ...billingVal, [f.key]: e.target.value })}
+                          >
+                            <option value="">Select</option>
+                            {f.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                          </select>
+                        ) : (
+                          <input
+                            type={f.type || 'text'}
+                            className="acct-input"
+                            value={billingVal[f.key] || ''}
+                            onChange={(e) => setBillingVal({ ...billingVal, [f.key]: e.target.value })}
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="acct-billing-edit-section">
+                  <div className="acct-form-heading">Automatic Renewal</div>
+                  <div className="acct-autopay-panel">
+                    <div>
+                      <strong>{isEnabled(billingVal.recurringBillingEnabled) ? 'Auto-renew is on' : 'Auto-renew is off'}</strong>
+                      <span>{billingView.hasSavedMethod ? 'Active services can renew automatically with your saved PayPal method.' : 'A saved PayPal method is required before automatic renewal can run.'}</span>
+                    </div>
+                    <label className="acct-switch">
+                      <input
+                        type="checkbox"
+                        checked={isEnabled(billingVal.recurringBillingEnabled)}
+                        onChange={(e) => setBillingVal({ ...billingVal, recurringBillingEnabled: e.target.checked })}
+                      />
+                      <span />
+                    </label>
+                  </div>
+                  <div className="acct-form-grid">
+                    {RECURRING_BILLING_FIELDS.map((f) => (
+                      <div key={f.key} className="acct-field">
+                        <label>{f.label}</label>
+                        {f.as === 'select' ? (
+                          <select
+                            className="acct-input"
+                            value={billingVal[f.key] || ''}
+                            onChange={(e) => setBillingVal({ ...billingVal, [f.key]: e.target.value })}
+                          >
+                            <option value="">Select</option>
+                            {f.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                          </select>
+                        ) : (
+                          <input
+                            className="acct-input"
+                            value={billingVal[f.key] || ''}
+                            onChange={(e) => setBillingVal({ ...billingVal, [f.key]: e.target.value })}
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="acct-billing-edit-section">
+                  <div className="acct-form-heading">Payment Method</div>
+                  <div className="acct-payment-sheet">
+                    <div className="acct-payment-sheet-head">
+                      <div>
+                        <h3>Update payment method</h3>
+                        <p>{billingView.hasSavedMethod ? billingView.card : 'Add a card or PayPal account for renewals.'}</p>
+                      </div>
+                      <span className="acct-secure-badge">{paypalSettings?.configured === false ? 'PayPal not configured' : 'Secured by PayPal'}</span>
+                    </div>
+
+                    <div className="acct-security-row">
+                      <span>Secure transmission</span>
+                      <span>Payment details stay with PayPal</span>
+                    </div>
+
+                    <div className="acct-pay-option-grid">
+                      <button type="button" className="acct-pay-option active">
+                        <span className="acct-pay-icon">CARD</span>
+                        <strong>Card</strong>
+                      </button>
+                      <button type="button" className="acct-pay-option" onClick={connectPayPal}>
+                        <span className="acct-pay-icon">PP</span>
+                        <strong>PayPal</strong>
+                      </button>
+                      <button type="button" className="acct-pay-option muted" disabled>
+                        <span className="acct-pay-icon">BANK</span>
+                        <strong>Bank</strong>
+                      </button>
+                    </div>
+
+                    <div className="acct-pay-form">
+                      <label className="acct-pay-field">
+                        <span>Name on card</span>
+                        <div className="acct-pay-hosted" ref={cardNameRef} />
+                      </label>
+
+                      <label className="acct-pay-field">
+                        <span>Card number</span>
+                        <div className="acct-pay-field-combo">
+                          <div className="acct-pay-hosted inline" ref={cardNumberRef} />
+                          <div className="acct-card-badges">
+                            <b>VISA</b>
+                            <b>MC</b>
+                            <b>Pay</b>
+                          </div>
+                        </div>
+                      </label>
+
+                      <div className="acct-card-field-row">
+                        <label className="acct-pay-field">
+                          <span>CVC</span>
+                          <div className="acct-pay-hosted" ref={cardCvvRef} />
+                        </label>
+                        <label className="acct-pay-field">
+                          <span>Expire date</span>
+                          <div className="acct-pay-hosted" ref={cardExpiryRef} />
+                        </label>
+                      </div>
+
+                      <label className="acct-remember-row">
+                        <input
+                          type="checkbox"
+                          checked={isEnabled(billingVal.recurringBillingEnabled)}
+                          onChange={(e) => setBillingVal({ ...billingVal, recurringBillingEnabled: e.target.checked })}
+                        />
+                        <span>Remember this payment method for future renewals</span>
+                      </label>
+
+                      {cardFieldsError && <div className="acct-pay-error">{cardFieldsError}</div>}
+
+                      <button
+                        type="button"
+                        className="acct-pay-continue"
+                        disabled={busy === 'paypal-card-submit' || !cardFieldsReady || paypalSettings?.configured === false}
+                        onClick={saveCardWithPayPal}
+                      >
+                        {busy === 'paypal-card-submit' ? 'Saving card...' : (billingView.hasSavedMethod ? 'Update card' : 'Save card')}
+                      </button>
+                      {paypalSetupId && (
+                        <button type="button" className="acct-btn" disabled={busy === 'paypal-complete'} onClick={finishPayPalConnection}>
+                          {busy === 'paypal-complete' ? 'Finishing...' : 'Finish connection'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="acct-card-collection">
+                    <div className="acct-card-visual">
+                      <div className="acct-card-chip" />
+                      <div className="acct-card-number">{billingView.hasSavedMethod ? billingView.card : '••••  ••••  ••••  ••••'}</div>
+                      <div className="acct-card-meta">
+                        <span>{billingView.provider}</span>
+                        <span>{billingView.cardExpiry || 'MM/YYYY'}</span>
+                      </div>
+                    </div>
+
+                    <div className="acct-card-fields">
+                      <div className="acct-field">
+                        <label>Name on card</label>
+                        <input
+                          className="acct-input"
+                          placeholder="Entered securely with PayPal"
+                          readOnly
+                          onClick={connectPayPal}
+                        />
+                      </div>
+                      <div className="acct-field">
+                        <label>Card number</label>
+                        <input
+                          className="acct-input"
+                          placeholder="PayPal secure card entry"
+                          readOnly
+                          onClick={connectPayPal}
+                        />
+                      </div>
+                      <div className="acct-card-field-row">
+                        <div className="acct-field">
+                          <label>Expiry</label>
+                          <input className="acct-input" placeholder="MM / YY" readOnly onClick={connectPayPal} />
+                        </div>
+                        <div className="acct-field">
+                          <label>Security code</label>
+                          <input className="acct-input" placeholder="CVC" readOnly onClick={connectPayPal} />
+                        </div>
+                      </div>
+                      <div className="acct-payment-actions">
+                        <button className="acct-btn primary" disabled={busy === 'paypal-setup'} onClick={connectPayPal}>
+                          {busy === 'paypal-setup' ? 'Opening...' : (billingView.hasSavedMethod ? 'Update card with PayPal' : 'Add card with PayPal')}
+                        </button>
+                        {paypalSetupId && (
+                          <button className="acct-btn" disabled={busy === 'paypal-complete'} onClick={finishPayPalConnection}>
+                            {busy === 'paypal-complete' ? 'Finishing...' : 'Finish connection'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="acct-card-note">Card details are entered in PayPal's secure checkout window. Glondia stores only the PayPal vault reference for future renewals.</div>
+                </div>
+
+                <div className="acct-form-actions">
+                  <button className="acct-btn primary" disabled={busy === 'billing'} onClick={saveBilling}>
+                    {busy === 'billing' ? 'Saving...' : 'Save Changes'}
+                  </button>
+                  <button className="acct-btn" onClick={cancelEdit}>Cancel</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

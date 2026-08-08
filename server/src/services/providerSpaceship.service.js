@@ -29,8 +29,8 @@ function spaceshipHeaders(extra = {}) {
     throw error;
   }
   return {
-    'X-API-Key': process.env.SPACESHIP_API_KEY,
-    'X-API-Secret': process.env.SPACESHIP_API_SECRET,
+    'X-Api-Key': process.env.SPACESHIP_API_KEY,
+    'X-Api-Secret': process.env.SPACESHIP_API_SECRET,
     Accept: 'application/json',
     ...extra,
   };
@@ -52,7 +52,13 @@ async function spaceshipRequest(path, options = {}) {
       ? 'Spaceship authentication failed. Check SPACESHIP_API_KEY, SPACESHIP_API_SECRET, API scopes, and any Spaceship IP restrictions.'
       : upstreamMessage;
     const error = new Error(safeMessage);
-    error.status = response.status >= 500 ? 502 : response.status;
+    // Do not pass upstream provider auth failures through as app auth failures.
+    // The browser clears the customer session on 401, but this 401 belongs to
+    // Spaceship credentials/scopes/IP allowlist, not the logged-in customer.
+    error.status = [401, 403].includes(response.status)
+      ? 502
+      : response.status >= 500 ? 502 : response.status;
+    error.providerStatus = response.status;
     error.details = body;
     error.expose = true;
     throw error;
@@ -154,7 +160,7 @@ export async function renewSpaceshipDomain(domain, input = {}) {
   };
 }
 
-export async function updateSpaceshipNameservers(domain, input = {}) {
+export function buildSpaceshipNameserverChange(domain, input = {}) {
   const name = cleanDomainName(domain);
   const hosts = Array.isArray(input.hosts) ? input.hosts.map((host) => String(host).trim()).filter(Boolean) : [];
   if (!hosts.length) {
@@ -162,11 +168,16 @@ export async function updateSpaceshipNameservers(domain, input = {}) {
     error.status = 400;
     throw error;
   }
-  await spaceshipRequest(`/domains/${encodeURIComponent(name)}/nameservers`, {
+  return { domain: name, payload: { provider: input.provider || 'custom', hosts } };
+}
+
+export async function updateSpaceshipNameservers(domain, input = {}) {
+  const change = buildSpaceshipNameserverChange(domain, input);
+  await spaceshipRequest(`/domains/${encodeURIComponent(change.domain)}/nameservers`, {
     method: 'PUT',
-    body: { provider: input.provider || 'custom', hosts },
+    body: change.payload,
   });
-  return { domain: name, provider: input.provider || 'custom', hosts };
+  return { domain: change.domain, ...change.payload };
 }
 
 export async function updateSpaceshipAutoRenew(domain, input = {}) {

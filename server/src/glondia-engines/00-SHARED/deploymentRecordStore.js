@@ -10,6 +10,8 @@
  */
 
 import { makeId, mutateHostingStore, nowIso } from '../../services/hostingStore.js';
+import * as hostingRepo from '../../repositories/hosting.repository.js';
+import { writeAuditLog } from '../../services/auditLogService.js';
 
 // ── Record creation ──────────────────────────────────────────────────────────
 
@@ -29,7 +31,10 @@ export async function createDeploymentRecord(input = {}) {
     renderDeployId:  null,
     serviceName:    input.serviceName || 'glondia-site',
     serviceType:    input.serviceType || 'static_site',
-    provider:       'render',
+    provider:       input.provider || 'render',
+    providerServiceId: null,
+    providerDeployId: null,
+    // Render-specific aliases remain during the compatibility migration.
     providerStatus: 'accepted',
     status:         input.status      || 'preparing',
     buildStatus:    input.buildStatus || 'queued',
@@ -68,6 +73,42 @@ export async function createDeploymentRecord(input = {}) {
     updatedAt: now,
   };
 
+  const organizationId = input.organizationId
+    || (input.userId && input.userId !== 'local-user' ? input.userId : 'personal');
+  await hostingRepo.createPendingBundle({
+    service: {
+      id: deploymentId,
+      organizationId,
+      createdByUserId: input.userId && input.userId !== 'local-user' ? input.userId : null,
+      provider: deployment.provider,
+      name: deployment.serviceName,
+      slug: `${renderSafeName(input.slug || deployment.serviceName).slice(0, 36)}-${deploymentId.slice(-8)}`,
+      serviceType: deployment.serviceType,
+      status: deployment.status,
+      region: input.region || null,
+      plan: input.plan || input.dedicatedTier || null,
+      paymentStatus: input.paymentStatus || 'pending',
+      metadata: canonicalMetadata(deployment, { deploymentSessionId }),
+    },
+    access: {
+      userId: input.userId && input.userId !== 'local-user' ? input.userId : null,
+      organizationId,
+      serviceName: deployment.serviceName,
+      planId: input.plan || input.dedicatedTier || null,
+      accessStatus: 'pending',
+      billingStatus: 'pending',
+      metadata: { source: deployment.source, deploymentSessionId },
+    },
+  });
+  await writeAuditLog({
+    organizationId,
+    actorUserId: input.userId && input.userId !== 'local-user' ? input.userId : null,
+    action: 'hosting.deployment.created',
+    entityType: 'hosting_service',
+    entityId: deploymentId,
+    result: { provider: deployment.provider, source: deployment.source, status: deployment.status },
+  });
+
   return mutateHostingStore((store) => {
     normalizeDeploymentStore(store);
     store.sessions.unshift(session);
@@ -80,6 +121,22 @@ export async function createDeploymentRecord(input = {}) {
 // ── Record updates ────────────────────────────────────────────────────────────
 
 export async function updateDeploymentRecord(deploymentId, patch = {}) {
+  const existing = await hostingRepo.findById(deploymentId);
+  if (existing) {
+    const providerServiceId = patch.providerServiceId || patch.renderServiceId;
+    await hostingRepo.updateProviderState(deploymentId, {
+      ...(patch.provider ? { provider: patch.provider } : {}),
+      ...(providerServiceId ? { providerServiceId } : {}),
+      ...(patch.status ? { status: patch.status } : {}),
+      ...(patch.serviceType ? { serviceType: patch.serviceType } : {}),
+      ...(patch.liveUrl !== undefined ? { url: patch.liveUrl } : {}),
+      ...(patch.region ? { region: patch.region } : {}),
+      ...(patch.plan ? { plan: patch.plan } : {}),
+      ...(patch.paymentStatus ? { paymentStatus: patch.paymentStatus } : {}),
+      ...(patch.checkoutOrderId ? { checkoutOrderId: patch.checkoutOrderId } : {}),
+      metadata: canonicalMetadata(existing, patch),
+    });
+  }
   return mutateHostingStore((store) => {
     normalizeDeploymentStore(store);
     const deployment = store.deployments.find(
@@ -94,6 +151,16 @@ export async function updateDeploymentRecord(deploymentId, patch = {}) {
 // ── Log helpers ───────────────────────────────────────────────────────────────
 
 export async function addDeploymentLog(deploymentId, message, level = 'info', details = null) {
+  const service = await hostingRepo.findById(deploymentId);
+  await writeAuditLog({
+    organizationId: service?.organizationId || null,
+    actorUserId: service?.createdByUserId || null,
+    action: `hosting.deployment.${details?.stage || 'log'}`,
+    entityType: 'hosting_service',
+    entityId: deploymentId,
+    status: level === 'error' ? 'error' : 'success',
+    result: { level, message, details: details || null },
+  });
   return mutateHostingStore((store) => {
     normalizeDeploymentStore(store);
     store.logs[deploymentId] = [
@@ -102,6 +169,19 @@ export async function addDeploymentLog(deploymentId, message, level = 'info', de
     ];
     return store.logs[deploymentId][0];
   });
+}
+
+function canonicalMetadata(existing, patch = {}) {
+  let current = {};
+  try { current = typeof existing?.metadata === 'string' ? JSON.parse(existing.metadata) : existing || {}; } catch { current = {}; }
+  return {
+    ...current,
+    deployment: {
+      ...(current.deployment || {}),
+      ...patch,
+      updatedAt: nowIso(),
+    },
+  };
 }
 
 export function makeLog(message, level = 'info', details = null) {

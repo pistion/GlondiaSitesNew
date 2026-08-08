@@ -1,55 +1,35 @@
 /**
- * deploymentPaypalService.js
+ * PayPal settlement for database-backed invoice checkout orders.
  *
- * PayPal (and card-via-PayPal) payment flow for deploy-first tiered billing.
- *
- * PayPal cannot settle PGK, so we DISPLAY PGK but CHARGE the configured
- * processor currency/amount (deploymentBilling.processorCurrency/Amount).
- * On a completed capture we mark the CheckoutOrder + deployment paid through
- * the shared deploymentBillingService.
+ * The provider is charged CheckoutOrder.totalAmountCents in the order currency.
+ * There are no fixed hosting tiers, forex fallbacks, or independently generated
+ * amounts in this module.
  */
 import { prisma } from './db.js';
 import { markDeploymentPaid } from './deploymentBillingService.js';
-import { deploymentBilling, getBillingTier, defaultTierId } from '../config/deploymentBilling.js';
-import { assertOrderPayable, assertAmountMatchesTier } from './paymentVerificationGuards.js';
-import { pgkToProcessorAmount } from './forexService.js';
-
-/** Resolve the pricing tier (and its processor charge) for an order. */
-function tierForOrder(order) {
-  const tierId = safeJson(order?.metadata).billingTierId || defaultTierId;
-  return getBillingTier(tierId);
-}
+import { assertOrderPayable, assertAmountMatchesOrder } from './paymentVerificationGuards.js';
+import {
+  createPaypalOrderWithOptionalVault,
+  savePaymentMethodFromCapture,
+  chargeUserPaymentMethod,
+  getOwnedPaymentMethod,
+  getDefaultPaymentMethod,
+} from './paymentMethodService.js';
 
 const SANDBOX = String(process.env.PAYPAL_SANDBOX ?? 'true').toLowerCase() !== 'false';
 const BASE = SANDBOX ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
 const FRONTEND = process.env.FRONTEND_URL || 'http://localhost:5173';
+let tokenCache = null;
+let tokenExpiry = 0;
 
-let _token = null;
-let _tokenExpiry = 0;
-
-async function getToken() {
-  if (_token && Date.now() < _tokenExpiry) return _token;
-  const id = process.env.PAYPAL_CLIENT_ID || '';
-  const sec = process.env.PAYPAL_CLIENT_SECRET || '';
-  if (!id || !sec) throw Object.assign(new Error('PayPal is not configured.'), { status: 400, expose: true });
-  const res = await fetch(`${BASE}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${id}:${sec}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-  if (!res.ok) throw Object.assign(new Error('Failed to authenticate with PayPal.'), { status: 400, expose: true });
-  const data = await res.json();
-  _token = data.access_token;
-  _tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return _token;
+function moneyValue(cents) {
+  return (Math.max(0, Number(cents || 0)) / 100).toFixed(2);
 }
 
-/** Exposed for the webhook service: OAuth token + API base for signature verification. */
-export async function getPaypalAccessToken() { return getToken(); }
-export function getPaypalApiBase() { return BASE; }
+function safeJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value || '{}'); } catch { return {}; }
+}
 
 function assertOwner(order, user) {
   if (user?.role === 'admin') return;
@@ -58,173 +38,143 @@ function assertOwner(order, user) {
   }
 }
 
-function safeJson(text) {
-  try { return JSON.parse(text || '{}'); } catch { return {}; }
+function assertInvoiceOrder(order) {
+  const invoiceId = safeJson(order.metadata).invoiceId;
+  if (!invoiceId || Number(order.totalAmountCents || 0) <= 0) {
+    throw Object.assign(
+      new Error('This checkout order is not backed by a payable invoice. Generate a current invoice first.'),
+      { status: 409, expose: true },
+    );
+  }
+  return invoiceId;
 }
 
-/** Create a PayPal order for a deployment's pending CheckoutOrder. */
-export async function createDeploymentPaypalOrder({ checkoutOrderId, user } = {}) {
-  if (!checkoutOrderId) throw Object.assign(new Error('checkoutOrderId is required.'), { status: 400, expose: true });
+async function getToken() {
+  if (tokenCache && Date.now() < tokenExpiry) return tokenCache;
+  const id = process.env.PAYPAL_CLIENT_ID || '';
+  const secret = process.env.PAYPAL_CLIENT_SECRET || '';
+  if (!id || !secret) throw Object.assign(new Error('PayPal is not configured.'), { status: 400, expose: true });
+  const response = await fetch(`${BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${id}:${secret}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  if (!response.ok) throw Object.assign(new Error('Failed to authenticate with PayPal.'), { status: 400, expose: true });
+  const payload = await response.json();
+  tokenCache = payload.access_token;
+  tokenExpiry = Date.now() + (Number(payload.expires_in || 300) - 60) * 1000;
+  return tokenCache;
+}
 
+export async function getPaypalAccessToken() {
+  return getToken();
+}
+
+export function getPaypalApiBase() {
+  return BASE;
+}
+
+export async function createDeploymentPaypalOrder({ checkoutOrderId, user } = {}) {
+  if (!checkoutOrderId) {
+    throw Object.assign(new Error('checkoutOrderId is required.'), { status: 400, expose: true });
+  }
   const order = await prisma.checkoutOrder.findUnique({ where: { id: checkoutOrderId } });
   if (!order) throw Object.assign(new Error('Order not found.'), { status: 404, expose: true });
   assertOwner(order, user);
+  const invoiceId = assertInvoiceOrder(order);
   if (order.status === 'paid') {
     return { alreadyPaid: true, checkoutOrderId: order.id, paypalOrderId: order.providerOrderId };
   }
+  assertOrderPayable(order);
 
-  // Charge the live forex-converted + GST amount for this tier (K50 promo or K200 standard).
-  // pgkToProcessorAmount(tier.amount) fetches the current PGK→USD rate (cached 1 h),
-  // multiplies by the PGK face value, then adds PNG's 10% GST.
-  const tier = tierForOrder(order);
-  const forex = await pgkToProcessorAmount(tier.amount);
-  const value    = forex.value;    // e.g. '55.00'
-  const currency = forex.currency; // always 'USD'
-  const token = await getToken();
-
-  console.log(
-    `[paypal:deployment] K${tier.amount} PGK → USD ${value} ` +
-    `(rate ${forex.rate}, GST ${forex.gstPercent}%, source: ${forex.source})`,
-  );
-
-  const ppRes = await fetch(`${BASE}/v2/checkout/orders`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify({
-      intent: 'CAPTURE',
-      purchase_units: [{
-        reference_id: order.id,
-        description: `Glondia hosting — K${tier.amount} PGK ≈ USD ${value} incl. ${forex.gstPercent}% GST`,
-        custom_id: order.deploymentId || order.id,
-        amount: {
-          currency_code: currency, value,
-          breakdown: { item_total: { currency_code: currency, value } },
-        },
-        items: [{
-          name: 'Glondia deployment hosting',
-          description: `K${tier.amount} PGK hosting fee (${tier.label}) incl. ${forex.gstPercent}% GST`,
-          quantity: '1',
-          unit_amount: { currency_code: currency, value },
-          category: 'DIGITAL_GOODS',
-        }],
-      }],
-      application_context: {
-        brand_name: 'Glondia', locale: 'en-US',
-        shipping_preference: 'NO_SHIPPING', user_action: 'PAY_NOW',
-        return_url: `${FRONTEND}/dashboard/hosting?payment=success`,
-        cancel_url: `${FRONTEND}/dashboard/hosting?payment=cancelled`,
+  const value = moneyValue(order.totalAmountCents);
+  const currency = String(order.currency || 'USD').toUpperCase();
+  const created = await createPaypalOrderWithOptionalVault({
+    intent: 'CAPTURE',
+    purchase_units: [{
+      reference_id: order.id,
+      custom_id: invoiceId,
+      description: `Glondia invoice ${safeJson(order.metadata).invoiceNumber || invoiceId}`,
+      amount: {
+        currency_code: currency,
+        value,
+        breakdown: { item_total: { currency_code: currency, value } },
       },
-    }),
+      items: [{
+        name: 'Glondia invoice',
+        description: 'Usage and service charges from your Glondia invoice',
+        quantity: '1',
+        unit_amount: { currency_code: currency, value },
+        category: 'DIGITAL_GOODS',
+      }],
+    }],
+    application_context: {
+      brand_name: 'Glondia',
+      locale: 'en-US',
+      shipping_preference: 'NO_SHIPPING',
+      user_action: 'PAY_NOW',
+      return_url: `${FRONTEND}/dashboard/billing?payment=success`,
+      cancel_url: `${FRONTEND}/dashboard/billing?payment=cancelled`,
+    },
   });
-
-  if (!ppRes.ok) {
-    const body = await ppRes.text();
-    console.error('[paypal:deployment] createOrder failed:', body);
-    throw Object.assign(new Error('Failed to create PayPal order. Please try again.'), { status: 400, expose: true });
-  }
-
-  const ppOrder = await ppRes.json();
-  const approvalUrl = ppOrder.links?.find((l) => l.rel === 'approve')?.href;
-
-  // Persist the exact amount charged so assertAmountMatchesTier can verify
-  // capture against the stored value (not a static tier config).
   await prisma.checkoutOrder.update({
     where: { id: order.id },
     data: {
       provider: 'paypal',
-      providerOrderId: ppOrder.id,
+      providerOrderId: created.id,
       metadata: JSON.stringify({
         ...safeJson(order.metadata),
-        paypal: {
-          orderId: ppOrder.id,
-          charged: { value, currency },
-          forex: {
-            pgkAmount:    tier.amount,
-            rate:         forex.rate,
-            gstPercent:   forex.gstPercent,
-            usdBeforeGst: forex.usdBeforeGst,
-            computedAt:   forex.computedAt,
-            source:       forex.source,
-          },
-        },
+        paypal: { orderId: created.id, charged: { value, currency } },
       }),
     },
   });
-
   return {
     checkoutOrderId: order.id,
-    paypalOrderId: ppOrder.id,
-    approvalUrl,
-    billingTierId: tier.id,
-    display: { amount: tier.amount, currency: tier.currency },
+    invoiceId,
+    paypalOrderId: created.id,
+    approvalUrl: created.approvalUrl,
     charged: { value, currency },
-    forex: { rate: forex.rate, gstPercent: forex.gstPercent, usdBeforeGst: forex.usdBeforeGst },
   };
 }
 
-/** Capture a PayPal order and mark the deployment + order paid. */
 export async function captureDeploymentPaypalOrder({ paypalOrderId, user } = {}) {
   if (!paypalOrderId) throw Object.assign(new Error('paypalOrderId is required.'), { status: 400, expose: true });
-
   const order = await prisma.checkoutOrder.findFirst({ where: { providerOrderId: paypalOrderId } });
   if (!order) throw Object.assign(new Error('Order not found for this PayPal order.'), { status: 404, expose: true });
   assertOwner(order, user);
-
-  // Idempotency — already settled.
+  const invoiceId = assertInvoiceOrder(order);
   if (order.status === 'paid') {
-    return { checkoutOrderId: order.id, deploymentId: order.deploymentId, status: 'paid', alreadyPaid: true };
+    return { checkoutOrderId: order.id, deploymentId: order.deploymentId, invoiceId, status: 'paid', alreadyPaid: true };
   }
-  // Only an unsettled order (pending / receipt-uploaded) may be captured.
   assertOrderPayable(order);
 
-  const token = await getToken();
-  const captureRes = await fetch(`${BASE}/v2/checkout/orders/${paypalOrderId}/capture`, {
+  const response = await fetch(`${BASE}/v2/checkout/orders/${encodeURIComponent(paypalOrderId)}/capture`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${await getToken()}`, 'Content-Type': 'application/json' },
   });
-
-  if (!captureRes.ok) {
-    const body = await captureRes.text();
-    console.error('[paypal:deployment] capture failed:', body);
+  const capture = await response.json().catch(() => ({}));
+  if (!response.ok) {
     throw Object.assign(new Error('PayPal payment capture failed. Please try again.'), { status: 400, expose: true });
   }
-
-  const capture = await captureRes.json();
   const purchaseUnit = capture.purchase_units?.[0] || {};
   const captureRecord = purchaseUnit.payments?.captures?.[0];
-  if (!captureRecord || captureRecord.status !== 'COMPLETED') {
-    throw Object.assign(
-      new Error(`Payment not completed. Status: ${captureRecord?.status ?? 'unknown'}`),
-      { status: 400, expose: true },
-    );
+  if (!captureRecord?.id || captureRecord.status !== 'COMPLETED') {
+    throw Object.assign(new Error('Payment was not completed.'), { status: 400, expose: true });
   }
-  // A verified capture MUST carry its own id — it is the providerCaptureId that
-  // markDeploymentPaid and the webhook use for idempotency.
-  if (!captureRecord.id) {
-    throw Object.assign(new Error('PayPal capture is missing a capture id.'), { status: 400, expose: true });
-  }
-
-  // The capture must refer back to OUR order. reference_id/custom_id were set to
-  // order.id / (deploymentId || order.id) when the PayPal order was created.
-  const refId = purchaseUnit.reference_id;
-  const customId = purchaseUnit.custom_id;
-  const expectedRefs = [order.id, order.deploymentId].filter(Boolean);
-  if (refId && !expectedRefs.includes(refId)) {
-    console.error(`[paypal:deployment] reference_id mismatch: ${refId} not in ${expectedRefs.join(',')}`);
+  if (purchaseUnit.reference_id && purchaseUnit.reference_id !== order.id) {
     throw Object.assign(new Error('Payment reference mismatch. Contact support.'), { status: 400, expose: true });
   }
-  if (customId && !expectedRefs.includes(customId)) {
-    console.error(`[paypal:deployment] custom_id mismatch: ${customId} not in ${expectedRefs.join(',')}`);
-    throw Object.assign(new Error('Payment reference mismatch. Contact support.'), { status: 400, expose: true });
+  if (purchaseUnit.custom_id && purchaseUnit.custom_id !== invoiceId) {
+    throw Object.assign(new Error('Invoice reference mismatch. Contact support.'), { status: 400, expose: true });
   }
-
-  // Verify the processor currency/amount for this order's tier (promo vs standard).
-  assertAmountMatchesTier({
+  assertAmountMatchesOrder({
     order,
     amount: captureRecord.amount?.value,
     currency: captureRecord.amount?.currency_code,
   });
-
   const result = await markDeploymentPaid({
     deploymentId: order.deploymentId,
     checkoutOrderId: order.id,
@@ -232,8 +182,85 @@ export async function captureDeploymentPaypalOrder({ paypalOrderId, user } = {})
     via: 'paypal',
     providerCaptureId: captureRecord.id,
   });
-
-  return { checkoutOrderId: order.id, deploymentId: order.deploymentId, status: 'paid', ...result };
+  const savedMethod = await savePaymentMethodFromCapture({
+    userId: user?.id || order.userId,
+    organizationId: order.organizationId,
+    capturePayload: capture,
+    productType: 'invoice',
+  });
+  return { checkoutOrderId: order.id, deploymentId: order.deploymentId, invoiceId, status: 'paid', paymentMethod: savedMethod, ...result };
 }
 
-export default { createDeploymentPaypalOrder, captureDeploymentPaypalOrder };
+export async function payDeploymentWithSavedMethod({
+  checkoutOrderId,
+  paymentMethodId = null,
+  user,
+} = {}) {
+  const order = await prisma.checkoutOrder.findUnique({ where: { id: checkoutOrderId } });
+  if (!order) throw Object.assign(new Error('Order not found.'), { status: 404, expose: true });
+  assertOwner(order, user);
+  const invoiceId = assertInvoiceOrder(order);
+  if (order.status === 'paid') {
+    return { checkoutOrderId: order.id, deploymentId: order.deploymentId, invoiceId, status: 'paid', alreadyPaid: true };
+  }
+  assertOrderPayable(order);
+  const value = moneyValue(order.totalAmountCents);
+  const currency = String(order.currency || 'USD').toUpperCase();
+  const charge = await chargeUserPaymentMethod({
+    userId: user?.id || order.userId,
+    paymentMethodId,
+    amountValue: value,
+    currency,
+    description: `Glondia invoice ${safeJson(order.metadata).invoiceNumber || invoiceId}`,
+    referenceId: order.id,
+    customId: invoiceId,
+    itemName: 'Glondia invoice',
+    productType: 'invoice',
+  });
+  assertAmountMatchesOrder({ order, amount: charge.amount, currency: charge.currency });
+  await prisma.checkoutOrder.update({
+    where: { id: order.id },
+    data: {
+      provider: 'paypal',
+      providerOrderId: charge.paypalOrderId,
+      providerCaptureId: charge.captureId,
+      metadata: JSON.stringify({
+        ...safeJson(order.metadata),
+        paypal: {
+          orderId: charge.paypalOrderId,
+          captureId: charge.captureId,
+          charged: { value: charge.amount, currency: charge.currency },
+          paymentMethodId: charge.paymentMethod?.id || paymentMethodId || null,
+        },
+      }),
+    },
+  });
+  const result = await markDeploymentPaid({
+    deploymentId: order.deploymentId,
+    checkoutOrderId: order.id,
+    actorUserId: user?.id !== 'local-user' ? user?.id : null,
+    via: 'paypal_saved_method',
+    providerCaptureId: charge.captureId,
+  });
+  return {
+    checkoutOrderId: order.id,
+    deploymentId: order.deploymentId,
+    invoiceId,
+    status: 'paid',
+    paymentMethod: charge.paymentMethod,
+    charged: { value: charge.amount, currency: charge.currency },
+    ...result,
+  };
+}
+
+export async function resolveSavedMethodForUser(userId, paymentMethodId = null) {
+  if (paymentMethodId) return getOwnedPaymentMethod(userId, paymentMethodId);
+  return getDefaultPaymentMethod(userId);
+}
+
+export default {
+  createDeploymentPaypalOrder,
+  captureDeploymentPaypalOrder,
+  payDeploymentWithSavedMethod,
+  resolveSavedMethodForUser,
+};

@@ -8,7 +8,14 @@
 
 import { prisma } from '../services/db.js';
 
-export async function listAuditForCustomer(userId, organizationIds = [], { limit = 50, offset = 0 } = {}) {
+export async function listAuditForCustomer(userId, organizationIds = [], {
+  limit = 50,
+  offset = 0,
+  action = null,
+  entityType = null,
+  dateFrom = null,
+  dateTo = null,
+} = {}) {
   const where = {
     OR: [
       { actorUserId: userId },
@@ -16,6 +23,14 @@ export async function listAuditForCustomer(userId, organizationIds = [], { limit
       ...(organizationIds.length ? [{ organizationId: { in: organizationIds } }] : []),
     ],
   };
+  if (action) where.action = { contains: String(action) };
+  if (entityType) where.entityType = String(entityType);
+  if (dateFrom || dateTo) {
+    where.createdAt = {
+      ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+      ...(dateTo ? { lte: new Date(dateTo) } : {}),
+    };
+  }
   const [items, total] = await Promise.all([
     prisma.auditLog.findMany({
       where,

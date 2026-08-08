@@ -24,17 +24,26 @@
     "db:validate": "prisma validate",
     "db:preflight": "node scripts/pre-migration-check.mjs",
     "migrate:builder-json": "node scripts/migrate-builder-json.mjs",
+    "backfill:hosting": "node scripts/backfill-hosting.mjs",
     "templates:bootstrap": "node scripts/bootstrap-generated-template-repo.mjs",
-    "predeploy": "npm run db:validate && npm run db:preflight && npm run build"
+    "predeploy": "npm run db:validate && npm run db:preflight && npm run build",
+    "domains:assign": "node scripts/assign-provider-domain.mjs",
+    "emails:assign": "node scripts/assign-provider-mailbox.mjs"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/lora": "^5.3.0",
+    "@fontsource/roboto": "^5.3.0",
+    "@fontsource/source-serif-4": "^5.3.0",
     "@prisma/client": "^5.22.0",
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "bcryptjs": "^2.4.3",
     "bootstrap": "^5.3.8",
     "cors": "^2.8.5",
+    "dompurify": "^3.4.13",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^1.16.0",
     "morgan": "^1.10.0",
@@ -42,7 +51,7 @@
     "openai": "^6.39.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.15.1"
+    "react-router-dom": "^7.11.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.1",

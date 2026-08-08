@@ -20,6 +20,8 @@ import {
   captureDeploymentPaypalOrder,
 } from './deploymentPaypalService.js';
 import { syncServiceAccessOnPayment } from './serviceAccessService.js';
+import { recordPaymentTransaction } from './billingRecordsService.js';
+import { recordFailedPayment } from './billingLifecycleService.js';
 
 export function webhookConfigured() {
   return Boolean(
@@ -143,9 +145,41 @@ export async function handlePaypalWebhookEvent(event = {}) {
       return { handled: true, alreadyPaid: true };
     }
     // role:'admin' bypasses the per-user owner check for this system-initiated capture.
-    const result = await captureDeploymentPaypalOrder({ paypalOrderId, user: { id: order.userId || null, role: 'admin' } });
+    let result;
+    try {
+      result = await captureDeploymentPaypalOrder({ paypalOrderId, user: { id: order.userId || null, role: 'admin' } });
+    } catch (error) {
+      await recordFailedPayment({
+        order,
+        provider: 'paypal',
+        providerTransactionId: resource.id || paypalOrderId,
+        error,
+        source: 'paypal_webhook_approved_capture',
+      });
+      await markWebhookStatus('failed', error.message);
+      return { handled: true, captured: false, failed: true };
+    }
     await markWebhookStatus('processed');
     return { handled: true, captured: true, result };
+  }
+
+  if (['PAYMENT.CAPTURE.DENIED', 'PAYMENT.CAPTURE.DECLINED', 'PAYMENT.CAPTURE.REVERSED'].includes(type)) {
+    const order = await findOrderForResource(resource);
+    if (!order) {
+      await markWebhookStatus('ignored');
+      return { handled: false, reason: 'order_not_found' };
+    }
+    await recordFailedPayment({
+      order,
+      provider: 'paypal',
+      providerTransactionId: resource.id || providerEventId || null,
+      error: Object.assign(new Error(resource.status_details?.reason || 'PayPal rejected the payment.'), {
+        code: resource.status_details?.reason || type.replaceAll('.', '_'),
+      }),
+      source: 'paypal_webhook',
+    });
+    await markWebhookStatus('processed');
+    return { handled: true, failed: true, orderId: order.id };
   }
 
   if (type === 'PAYMENT.CAPTURE.COMPLETED') {
@@ -185,9 +219,16 @@ export async function handlePaypalWebhookEvent(event = {}) {
         via: 'paypal_webhook',
       });
     } else {
-      await prisma.checkoutOrder.update({
+      const paidOrder = await prisma.checkoutOrder.update({
         where: { id: order.id },
         data: { status: 'paid', paidAt: new Date(), providerCaptureId: resource.id },
+      });
+      await recordPaymentTransaction({
+        order: paidOrder,
+        providerTransactionId: resource.id,
+        provider: 'paypal',
+        status: 'completed',
+        metadata: { via: 'paypal_webhook' },
       });
       result = { orderId: order.id };
     }

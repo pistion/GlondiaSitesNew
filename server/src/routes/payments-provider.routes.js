@@ -7,16 +7,19 @@
  */
 
 import express from 'express';
-import { providerApiGuard } from '../glondia-engines/01-HOSTING-DEPLOY-ENGINE/services/providerApiGuard.service.js';
+import authMiddleware from '../middleware/authMiddleware.js';
 import paymentsProviderController from '../controllers/payments-provider.controller.js';
 
 const router = express.Router();
 
 router.get('/paypal-client', paymentsProviderController.getPaypalClient);
-router.post('/domain/create-order', providerApiGuard, paymentsProviderController.createDomainOrder);
-router.post('/domain/capture', providerApiGuard, paymentsProviderController.captureDomainOrder);
-router.post('/hosting/create-order', providerApiGuard, paymentsProviderController.createHostingOrder);
-router.post('/hosting/capture', providerApiGuard, paymentsProviderController.captureHostingOrder);
-router.get('/hosting/status/:deploymentId', paymentsProviderController.getHostingStatus);
+router.post('/domain/validate-cart', authMiddleware, paymentsProviderController.validateDomainCart);
+router.post('/domain/create-order', authMiddleware, paymentsProviderController.createDomainOrder);
+router.post('/domain/capture', authMiddleware, paymentsProviderController.captureDomainOrder);
+router.post('/domain-addon/create-order', authMiddleware, paymentsProviderController.createDomainAddonOrder);
+router.post('/domain-addon/capture', authMiddleware, paymentsProviderController.captureDomainAddonOrder);
+router.post('/hosting/create-order', authMiddleware, paymentsProviderController.createHostingOrder);
+router.post('/hosting/capture', authMiddleware, paymentsProviderController.captureHostingOrder);
+router.get('/hosting/status/:deploymentId', authMiddleware, paymentsProviderController.getHostingStatus);
 
 export default router;

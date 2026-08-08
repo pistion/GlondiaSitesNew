@@ -7,15 +7,13 @@ export function HandoffSummaryCard({ config }) {
   const rows = [
     { label: 'Name',    value: config.serviceName || 'auto' },
     { label: 'Type',    value: config.serviceType || 'static_site' },
-    { label: 'Repo',    value: config.sourceRepository || config.repoUrl || '(server default)', mono: true, wrap: true },
+    { label: 'Source',  value: config.sourceRepository || config.repoUrl || 'Uploaded package', mono: true, wrap: true },
     { label: 'Branch',  value: config.branch || 'main', mono: true },
-    { label: 'Root',    value: config.rootDirectory || 'repo root', mono: true },
+    { label: 'Folder',  value: config.rootDirectory || 'project root', mono: true },
     { label: 'Build',   value: config.buildCommand || 'Not set', mono: true },
     isStatic
       ? { label: 'Publish', value: config.publishDirectory || config.outputDirectory || 'Not set', mono: true }
       : { label: 'Start',   value: config.startCommand || 'Not set', mono: true },
-    { label: 'Plan',    value: config.plan || 'starter', mono: true },
-    { label: 'Region',  value: config.region || 'oregon', mono: true },
   ];
 
   return (
@@ -37,7 +35,7 @@ export function HandoffSummaryCard({ config }) {
           color: 'inherit',
         }}
       >
-        <span className="eyebrow" style={{ margin: 0 }}>Suggested hosting settings</span>
+        <span className="eyebrow" style={{ margin: 0 }}>Glondia launch settings</span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
           {open ? 'Hide' : 'View'} <span style={{ fontSize: 10 }}>{open ? '▲' : '▼'}</span>
         </span>

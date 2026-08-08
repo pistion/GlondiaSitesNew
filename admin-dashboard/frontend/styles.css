@@ -13403,6 +13403,15 @@ textarea:hover,
   gap: 18px;
 }
 
+.admin-relationship-tabs { display:flex; gap:4px; overflow-x:auto; margin-bottom:14px; border-bottom:1px solid var(--line); }
+.admin-relationship-tabs button { flex:0 0 auto; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--muted); padding:10px 14px; font:800 12px/1.2 var(--font,system-ui,sans-serif); cursor:pointer; }
+.admin-relationship-tabs button:hover, .admin-relationship-tabs button.is-active { color:var(--primary); border-bottom-color:var(--primary); }
+.admin-relationship-panel { display:grid; gap:12px; }
+.admin-relationship-panel__head { display:flex; align-items:end; justify-content:space-between; gap:16px; }
+.admin-relationship-panel__head div { display:grid; gap:4px; }
+.admin-relationship-panel__head strong { color:var(--ink); font-size:15px; }
+.admin-relationship-panel__head span { color:var(--muted); font-size:12px; }
+
 .talent-customer-pool .pool-tab-strip {
   margin-bottom: 0;
 }
@@ -13844,6 +13853,14 @@ textarea:hover,
   padding: 12px 14px;
 }
 
+.customer-ux-grids { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.customer-ux-table { border:1px solid var(--line); border-radius:14px; background:var(--paper); padding:13px; min-width:0; }
+.customer-ux-table > strong { display:block; margin-bottom:9px; font-size:12px; }
+.customer-ux-table > span { color:var(--muted); font-size:12px; }
+.customer-ux-table table { width:100%; border-collapse:collapse; font-size:12px; }
+.customer-ux-table td { padding:6px 0; border-top:1px solid var(--line); overflow-wrap:anywhere; }
+.customer-ux-table td:last-child { text-align:right; color:var(--muted); }
+
 .customer-service-row strong,
 .customer-access-list strong {
   display: block;
@@ -13881,6 +13898,7 @@ textarea:hover,
   .customer-access-list div {
     grid-template-columns: 1fr;
   }
+  .customer-ux-grids { grid-template-columns:1fr; }
 }
 
 @media (max-width: 520px) {

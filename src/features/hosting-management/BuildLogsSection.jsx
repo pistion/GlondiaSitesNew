@@ -1,12 +1,44 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Badge } from '../../components';
+import { ICN } from '../../icons';
 import { getDeploymentLogStreamUrl } from '../../api';
-import { formatTime } from './shared';
+
+function formatLogStamp(value) {
+  try {
+    const date = value ? new Date(value) : new Date();
+    if (!Number.isFinite(date.getTime())) return '—';
+    const month = date.toLocaleString([], { month: 'short' });
+    const day = String(date.getDate()).padStart(2, '0');
+    const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${month} ${day} ${time}`;
+  } catch {
+    return '—';
+  }
+}
+
+function normalizeLevel(log) {
+  const level = String(log?.level || log?.type || '').toLowerCase();
+  const message = String(log?.message || log?.msg || '').toLowerCase();
+  if (level.includes('error') || message.includes('failed') || message.includes('error')) return 'error';
+  if (level.includes('warn') || message.includes('warning')) return 'warn';
+  if (message.includes('done') || message.includes('success') || message.includes('live')) return 'success';
+  return 'info';
+}
+
+function rowPrefix(log) {
+  const source = String(log?.source || '').toLowerCase();
+  if (source === 'render' || source === 'provider') return '==>';
+  if (source === 'system' || source === 'sys') return '•';
+  return '›';
+}
 
 export default function BuildLogsSection({ deploymentId, compact = false }) {
   const [lines, setLines] = useState([]);
   const [streamStatus, setStreamStatus] = useState(null);
   const [connState, setConnState] = useState('connecting');
+  const [filter, setFilter] = useState('all');
+  const [query, setQuery] = useState('');
+  const [liveTail, setLiveTail] = useState(true);
   const bottomRef = useRef(null);
   const seenIds = useRef(new Set());
 
@@ -34,33 +66,93 @@ export default function BuildLogsSection({ deploymentId, compact = false }) {
   }, [deploymentId]);
 
   useEffect(() => {
-    if (!compact) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [lines.length, compact]);
+    if (liveTail && !compact) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [lines.length, compact, liveTail]);
+
+  const displayLines = lines;
+  const filteredLines = displayLines.filter((log) => {
+    const level = normalizeLevel(log);
+    if (filter !== 'all' && level !== filter) return false;
+    if (!query.trim()) return true;
+    return String(log.message || log.msg || '').toLowerCase().includes(query.trim().toLowerCase());
+  });
 
   return (
-    <div className="card">
-      <div className="row between" style={{ marginBottom: 10 }}>
-        <h2 style={{ margin: 0, fontSize: compact ? 14 : 18 }}>{compact ? 'Live logs' : 'Build Logs'}</h2>
-        <Badge tone={connState === 'live' ? 'success' : connState === 'error' ? 'danger' : 'muted'} dot={connState === 'live'}>{connState}</Badge>
+    <div className={`hosting-log-console${compact ? ' is-compact' : ''}`}>
+      <div className="hosting-log-toolbar">
+        <label className="hosting-log-select">
+          <select value={filter} onChange={(event) => setFilter(event.target.value)} aria-label="Filter logs">
+            <option value="all">All logs</option>
+            <option value="info">Info</option>
+            <option value="success">Success</option>
+            <option value="warn">Warnings</option>
+            <option value="error">Errors</option>
+          </select>
+          <ICN.ChevronDown size={16} />
+        </label>
+
+        <label className="hosting-log-search">
+          <ICN.Search size={18} />
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search"
+            aria-label="Search logs"
+          />
+        </label>
+
+        <button
+          type="button"
+          className={`hosting-log-live${liveTail ? ' is-on' : ''}`}
+          onClick={() => setLiveTail((value) => !value)}
+        >
+          <ICN.Zap size={17} />
+          <span>{liveTail ? 'Live tail' : 'Paused'}</span>
+          <ICN.ChevronDown size={15} />
+        </button>
+
+        <span className="hosting-log-tz">PST</span>
+
+        <button type="button" className="hosting-log-icon-btn" onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })} title="Jump to latest">
+          <ICN.ArrowRight size={18} style={{ transform: 'rotate(90deg)' }} />
+        </button>
+        <button type="button" className="hosting-log-icon-btn" title="Open full logs">
+          <ICN.ExternalLink size={17} />
+        </button>
       </div>
+
       {streamStatus && (
-        <div className="hosting-chip-row">
+        <div className="hosting-log-status">
           <Badge tone={streamStatus.status === 'live' ? 'success' : streamStatus.status === 'failed' ? 'danger' : 'muted'} dot={false}>
             {streamStatus.currentStep || streamStatus.status || 'Preparing'}
           </Badge>
+          <span>{filteredLines.length} of {displayLines.length} events</span>
+          <span>Connection: {connState}</span>
         </div>
       )}
-      <div className="term hosting-log-panel" style={{ maxHeight: compact ? 220 : 520 }}>
-        {lines.length === 0 && <div><span className="dim">No log lines yet.</span></div>}
-        {lines.map((log, index) => (
-          <div key={log.id || index} className="hosting-log-line">
-            <span className="ts">{formatTime(log.timestamp || log.createdAt)}</span>
-            <span className="dim">[{log.source === 'render' ? 'render' : 'sys'}]</span>
-            <span className={log.level === 'error' ? 'err' : log.level === 'warn' ? 'warn' : log.source === 'render' ? '' : 'dim'}>
-              {log.message || log.msg}
-            </span>
+
+      <div className="hosting-log-panel" style={{ maxHeight: compact ? 220 : 560 }}>
+        {filteredLines.length === 0 && (
+          <div className="hosting-log-empty">
+            <span>No log lines yet.</span>
+            <small>{connState === 'live' ? 'Waiting for provider events…' : `Stream is ${connState}.`}</small>
           </div>
-        ))}
+        )}
+        {filteredLines.map((log, index) => {
+          const level = normalizeLevel(log);
+          return (
+            <div key={log.id || index} className={`hosting-log-line level-${level}`}>
+              <span className="hosting-log-time">{formatLogStamp(log.timestamp || log.createdAt)}</span>
+              <span className="hosting-log-level" title={level}>i</span>
+              <span className="hosting-log-prefix">{rowPrefix(log)}</span>
+              <span className="hosting-log-message">
+                {log.stage && <span className="hosting-log-stage">[{String(log.stage).replaceAll('_', ' ')}] </span>}
+                {log.message || log.msg}
+              </span>
+            </div>
+          );
+        })}
         <div ref={bottomRef} />
       </div>
     </div>

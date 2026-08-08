@@ -36,16 +36,14 @@ function Row({ label, value, note }) {
 
 export function AdminSettingsSection({ overview }) {
   const ov = overview || {};
-  const promo = ov.promo || {};
   const providerCost = ov.providerCost || {};
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>
       <SettingsCard title="Billing configuration" icon={ICN.CreditCard}>
-        <Row label="Currency" value="PGK (Papua New Guinea Kina)" />
+        <Row label="Currency" value="Per provider invoice" />
         <Row label="Platform markup" value={ov.platformMargin?.markupPercent != null ? `${ov.platformMargin.markupPercent}%` : '—'} note="applied on top of provider cost" />
-        <Row label="Promo tier" value="K50 (promo_50)" note="6 months" />
-        <Row label="Standard tier" value="K200 (standard_200)" note="12 months" />
+        <Row label="Charge source" value="Recorded service usage" note="usage to invoice to payment" />
         <Row
           label="Margin note"
           value={ov.platformMargin?.note ? (
@@ -54,20 +52,12 @@ export function AdminSettingsSection({ overview }) {
         />
       </SettingsCard>
 
-      <SettingsCard title="Promo programme" icon={ICN.Tag}>
-        <Row label="Total promo slots" value={promo.limit ?? 20} />
-        <Row label="Slots used" value={promo.used ?? '—'} />
-        <Row label="Slots remaining" value={promo.remaining ?? '—'} />
-        <Row label="Paid promo (K50)" value={promo.paidPromo ?? 0} />
-        <Row label="Paid standard (K200)" value={promo.paidStandard ?? 0} />
-      </SettingsCard>
-
       <SettingsCard title="Hosting plan defaults" icon={ICN.Server}>
         <Row label="Free tier" value="Free" note="no billing required" />
         <Row label="Starter tier" value="Starter" note="paid, basic resources" />
         <Row label="Standard tier" value="Standard" note="paid, full resources" />
         <Row label="Default new deployment" value="free" note="until payment received" />
-        <Row label="After promo payment" value="starter or standard" note="set by billing tier" />
+        <Row label="After payment" value="standard" note="standard hosting tier" />
       </SettingsCard>
 
       <SettingsCard title="Render config status" icon={ICN.Activity}>

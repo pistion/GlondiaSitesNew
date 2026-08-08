@@ -1,168 +1,240 @@
-/**
- * glondia-mail.service.js — GlondiaMail webmail (read/send).
- *
- * Separate from Dashboard Business Email setup.
- * IMAP/SMTP credentials stay server-side only.
- * Never logs or returns mailbox passwords.
- * MVP: safe disabled responses until IMAP/SMTP is configured.
- */
+import { randomBytes } from 'node:crypto';
+import { verifyPassword } from './authService.js';
+import { prisma } from './db.js';
 
-function env(name, fallback = '') {
-  return String(process.env[name] ?? fallback).trim();
-}
+const sessions = new Map();
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export function getMailProviderConfig() {
-  const imapHost = env('GLONDIA_MAIL_IMAP_HOST');
-  const smtpHost = env('GLONDIA_MAIL_SMTP_HOST');
-  const imapPort = Number(env('GLONDIA_MAIL_IMAP_PORT', '993')) || 993;
-  const smtpPort = Number(env('GLONDIA_MAIL_SMTP_PORT', '465')) || 465;
-  const configured = Boolean(imapHost && smtpHost);
-
   return {
-    configured,
-    // Never expose passwords or secrets — hostnames/ports only for status UI.
-    imap: configured ? { host: imapHost, port: imapPort, secure: imapPort === 993 } : null,
-    smtp: configured ? { host: smtpHost, port: smtpPort, secure: smtpPort === 465 || smtpPort === 587 } : null,
-    message: configured
-      ? 'GlondiaMail provider hosts are set. Full IMAP/SMTP session handling will connect server-side only.'
-      : 'GlondiaMail connection is being prepared. IMAP/SMTP is not configured yet.',
-  };
-}
-
-function disabledPayload(extra = {}) {
-  const cfg = getMailProviderConfig();
-  return {
-    enabled: false,
-    configured: cfg.configured,
-    message: cfg.message,
-    folders: [],
-    messages: [],
-    ...extra,
-  };
-}
-
-/** Session check — no fake logged-in user when IMAP is off. */
-export async function getSession(req) {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) {
-    return {
-      authenticated: false,
-      enabled: false,
-      configured: false,
-      message: 'GlondiaMail connection is being prepared.',
-      mailbox: null,
-    };
-  }
-  // Future: validate opaque server-side session cookie. No password in response.
-  const session = req.glondiaMailSession || null;
-  return {
-    authenticated: Boolean(session?.mailbox),
-    enabled: true,
     configured: true,
-    message: session?.mailbox
-      ? 'Signed in to GlondiaMail.'
-      : 'Sign in with your mailbox address. Passwords are verified server-side only.',
-    mailbox: session?.mailbox || null,
+    transportConfigured: false,
+    message: 'GlondiaMail authentication is active. Provider password transport is disabled.',
   };
+}
+
+function cookieToken(req) {
+  const cookies = String(req?.headers?.cookie || '').split(';');
+  for (const cookie of cookies) {
+    const [name, ...value] = cookie.trim().split('=');
+    if (name === 'glondia_mail_session') return decodeURIComponent(value.join('='));
+  }
+  return '';
+}
+
+function requireSession(req) {
+  const token = cookieToken(req);
+  const session = sessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (token) sessions.delete(token);
+    throw Object.assign(new Error('GlondiaMail session expired.'), { status: 401, code: 'MAIL_SESSION_REQUIRED' });
+  }
+  session.expiresAt = Date.now() + SESSION_TTL_MS;
+  return session;
+}
+
+async function findMailbox(email) {
+  return prisma.emailMailbox.findUnique({
+    where: { email: String(email || '').trim().toLowerCase() },
+    include: { businessService: true },
+  });
+}
+
+function addresses(value) {
+  return Array.isArray(value?.value)
+    ? value.value.map((item) => ({ name: item.name || '', address: item.address || '' }))
+    : [];
+}
+
+function parseJson(value, fallback = []) {
+  try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
+}
+
+function publicMessage(row, includeBody = false) {
+  const from = parseJson(row.fromJson);
+  const to = parseJson(row.toJson);
+  const cc = parseJson(row.ccJson);
+  const replyTo = parseJson(row.replyToJson);
+  const flags = parseJson(row.flagsJson);
+  return {
+    id: row.id,
+    subject: row.subject || '(no subject)',
+    from: from[0]?.address || '',
+    fromName: from[0]?.name || '',
+    to: to.map((item) => item.address).filter(Boolean).join(', '),
+    addresses: { from, to, cc, replyTo },
+    date: row.receivedAt || row.sentAt,
+    sentAt: row.sentAt,
+    receivedAt: row.receivedAt,
+    unread: !flags.includes('\\Seen'),
+    flagged: flags.includes('\\Flagged'),
+    flags,
+    folderRole: row.folder?.role || null,
+    folderId: row.folderId,
+    sizeBytes: row.sizeBytes,
+    hasAttachments: row.hasAttachments,
+    ...(includeBody ? {
+      textBody: row.textBody,
+      htmlBody: row.htmlBody,
+      cc: cc.map((item) => item.address).filter(Boolean).join(', '),
+      replyTo: replyTo.map((item) => item.address).filter(Boolean).join(', '),
+      attachments: row.attachments?.map((item) => ({
+        id: item.id,
+        filename: item.filename,
+        contentType: item.contentType,
+        sizeBytes: item.sizeBytes,
+        contentId: item.contentId,
+      })) || [],
+    } : {}),
+  };
+}
+
+export async function getSession(req) {
+  try {
+    const session = requireSession(req);
+    return { authenticated: true, enabled: true, configured: true, transportConfigured: false, mailbox: session.email, message: 'Signed in to GlondiaMail.' };
+  } catch {
+    const cfg = getMailProviderConfig();
+    return { authenticated: false, enabled: cfg.configured, configured: cfg.configured, mailbox: null, message: 'Sign in with your GlondiaMail password.' };
+  }
 }
 
 export async function login(body = {}) {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) {
-    const err = new Error('GlondiaMail connection is being prepared. IMAP/SMTP is not configured yet.');
-    err.status = 503;
-    err.code = 'GLONDIA_MAIL_NOT_CONFIGURED';
-    throw err;
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  const mailbox = await findMailbox(email);
+  if (!mailbox || mailbox.status === 'suspended') {
+    throw Object.assign(new Error('Mailbox address or GlondiaMail password is incorrect.'), { status: 401, code: 'INVALID_MAILBOX_CREDENTIALS' });
   }
-
-  const email = String(body.email || body.mailbox || '').trim().toLowerCase();
-  const password = body.password; // never log or return
-  if (!email || !String(email).includes('@')) {
-    const err = new Error('Enter a valid mailbox email address.');
-    err.status = 400;
-    err.code = 'VALIDATION_ERROR';
-    throw err;
-  }
-  if (!password || String(password).length < 1) {
-    const err = new Error('Password is required.');
-    err.status = 400;
-    err.code = 'VALIDATION_ERROR';
-    throw err;
-  }
-
-  // Intentionally do not authenticate against a real provider until IMAP client is wired.
-  // Clear password from memory path as much as possible.
-  void password;
-
-  const err = new Error('GlondiaMail IMAP login is not enabled yet. Your password was not stored.');
-  err.status = 503;
-  err.code = 'GLONDIA_MAIL_LOGIN_PENDING';
-  throw err;
+  const valid = await verifyPassword(password, mailbox.passwordHash);
+  if (!valid) throw Object.assign(new Error('Mailbox address or GlondiaMail password is incorrect.'), { status: 401, code: 'INVALID_MAILBOX_CREDENTIALS' });
+  const token = randomBytes(32).toString('base64url');
+  sessions.set(token, {
+    email,
+    userId: mailbox.userId,
+    organizationId: mailbox.businessService.organizationId,
+    mailboxId: mailbox.id,
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  });
+  return { token, mailbox: email, expiresInMs: SESSION_TTL_MS };
 }
 
-export async function logout() {
+export async function logout(req) {
+  const token = cookieToken(req);
+  if (token) sessions.delete(token);
   return { ok: true, message: 'Signed out of GlondiaMail.' };
 }
 
-export async function listFolders() {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) return disabledPayload();
-  // No fake mailboxes — empty until IMAP is live.
+export async function listFolders(req) {
+  const session = requireSession(req);
+  const rows = await prisma.mailFolder.findMany({
+    where: { userId: session.userId, emailMailboxId: session.mailboxId },
+    orderBy: [{ role: 'asc' }, { name: 'asc' }],
+  });
   return {
     enabled: true,
     configured: true,
-    message: 'Folders will appear after IMAP is connected.',
-    folders: [
-      { id: 'inbox', name: 'Inbox', role: 'inbox' },
-      { id: 'starred', name: 'Starred', role: 'starred' },
-      { id: 'sent', name: 'Sent', role: 'sent' },
-      { id: 'drafts', name: 'Drafts', role: 'drafts' },
-      { id: 'spam', name: 'Spam', role: 'spam' },
-      { id: 'trash', name: 'Trash', role: 'trash' },
-      { id: 'archive', name: 'Archive', role: 'archive' },
-    ],
+    transportConfigured: false,
+    folders: rows.map((row) => ({ id: row.providerFolderId, name: row.name, role: row.role })),
   };
 }
 
-export async function listMessages(query = {}) {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) return disabledPayload({ folder: query.folder || 'inbox' });
-  // Never invent real-looking mail.
-  return {
-    enabled: true,
-    configured: true,
-    folder: query.folder || 'inbox',
-    messages: [],
-    message: 'No messages yet. Inbox sync will use server-side IMAP when enabled.',
-  };
+export async function listMessages(req, query = {}) {
+  const session = requireSession(req);
+  const folder = String(query.folder || 'INBOX');
+  const folderRole = folder.toLowerCase() === 'spam' ? 'junk' : folder.toLowerCase();
+  const rows = await prisma.mailMessage.findMany({
+    where: {
+      userId: session.userId,
+      emailMailboxId: session.mailboxId,
+      folder: {
+        OR: [
+          { providerFolderId: folder },
+          { role: folderRole },
+        ],
+      },
+    },
+    include: { folder: true },
+    orderBy: [{ receivedAt: 'desc' }, { importedAt: 'desc' }],
+    take: 250,
+  });
+  return { enabled: true, configured: true, transportConfigured: false, folder, messages: rows.map((row) => publicMessage(row)) };
 }
 
-export async function getMessage(id) {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) {
-    const err = new Error('GlondiaMail connection is being prepared.');
-    err.status = 503;
-    err.code = 'GLONDIA_MAIL_NOT_CONFIGURED';
-    throw err;
-  }
-  const err = new Error('Message not found.');
-  err.status = 404;
-  err.code = 'NOT_FOUND';
-  throw err;
+export async function getMessage(req, id) {
+  const session = requireSession(req);
+  const row = await prisma.mailMessage.findFirst({
+    where: { id: String(id || ''), userId: session.userId, emailMailboxId: session.mailboxId },
+    include: { attachments: true, folder: true },
+  });
+  if (!row) throw Object.assign(new Error('Message not found.'), { status: 404, code: 'NOT_FOUND' });
+  return publicMessage(row, true);
 }
 
-export async function sendMail(body = {}) {
-  const cfg = getMailProviderConfig();
-  if (!cfg.configured) {
-    const err = new Error('GlondiaMail connection is being prepared. Cannot send mail yet.');
-    err.status = 503;
-    err.code = 'GLONDIA_MAIL_NOT_CONFIGURED';
-    throw err;
+function updateFlag(flags, name, enabled) {
+  const next = new Set(Array.isArray(flags) ? flags : []);
+  if (enabled) next.add(name); else next.delete(name);
+  return [...next];
+}
+
+export async function updateMessage(req, id, body = {}) {
+  const session = requireSession(req);
+  const row = await prisma.mailMessage.findFirst({
+    where: { id: String(id || ''), userId: session.userId, emailMailboxId: session.mailboxId },
+  });
+  if (!row) throw Object.assign(new Error('Message not found.'), { status: 404, code: 'NOT_FOUND' });
+  let flags = parseJson(row.flagsJson);
+  if (typeof body.seen === 'boolean') flags = updateFlag(flags, '\\Seen', body.seen);
+  if (typeof body.flagged === 'boolean') flags = updateFlag(flags, '\\Flagged', body.flagged);
+  const updated = await prisma.mailMessage.update({
+    where: { id: row.id },
+    data: { flagsJson: JSON.stringify(flags) },
+    include: { attachments: true, folder: true },
+  });
+  return publicMessage(updated, true);
+}
+
+export async function moveMessage(req, id, body = {}) {
+  const session = requireSession(req);
+  const destinationRole = String(body.folderRole || '').trim().toLowerCase();
+  if (!destinationRole) throw Object.assign(new Error('Destination folder role is required.'), { status: 400, code: 'FOLDER_ROLE_REQUIRED' });
+  const [message, folder] = await Promise.all([
+    prisma.mailMessage.findFirst({ where: { id: String(id || ''), userId: session.userId, emailMailboxId: session.mailboxId } }),
+    prisma.mailFolder.findFirst({ where: { userId: session.userId, emailMailboxId: session.mailboxId, role: destinationRole } }),
+  ]);
+  if (!message) throw Object.assign(new Error('Message not found.'), { status: 404, code: 'NOT_FOUND' });
+  if (!folder) throw Object.assign(new Error(`The ${destinationRole} folder is unavailable.`), { status: 404, code: 'FOLDER_NOT_FOUND' });
+  const updated = await prisma.mailMessage.update({
+    where: { id: message.id },
+    data: { folderId: folder.id },
+    include: { attachments: true, folder: true },
+  });
+  return publicMessage(updated, true);
+}
+
+export async function getAttachment(req, messageId, attachmentId) {
+  const session = requireSession(req);
+  const row = await prisma.mailAttachment.findFirst({
+    where: {
+      id: String(attachmentId || ''),
+      messageId: String(messageId || ''),
+      message: {
+        userId: session.userId,
+        emailMailboxId: session.mailboxId,
+      },
+    },
+  });
+  if (!row || !row.content) {
+    throw Object.assign(new Error('Attachment not found.'), { status: 404, code: 'ATTACHMENT_NOT_FOUND' });
   }
-  // Do not accept/store passwords here; sending uses server SMTP session later.
+  return row;
+}
+
+export async function sendMail(req, body = {}) {
+  requireSession(req);
   void body;
-  const err = new Error('SMTP send is not enabled yet.');
-  err.status = 503;
-  err.code = 'GLONDIA_MAIL_SEND_PENDING';
-  throw err;
+  throw Object.assign(new Error('Sending is unavailable because provider password transport is disabled.'), {
+    status: 503,
+    code: 'MAIL_TRANSPORT_DISABLED',
+  });
 }

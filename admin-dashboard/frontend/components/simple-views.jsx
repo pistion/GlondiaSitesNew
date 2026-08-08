@@ -546,11 +546,17 @@ function CustomerProfileCard({ user, onOpen }) {
 
 function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTab }) {
   const account = detail?.user || selected;
-  const deployments = detail?.deployments || [];
-  const orders = detail?.orders || [];
-  const receipts = detail?.receipts || [];
-  const totals = detail?.totals || {};
-  const paidCents = Number(totals.paidCents || 0);
+  const deployments = detail?.services || [];
+  const orders = detail?.billing?.orders || [];
+  const receipts = detail?.billing?.receipts || [];
+  const invoices = detail?.billing?.invoices || [];
+  const subscriptions = detail?.billing?.subscriptions || [];
+  const analytics = detail?.analytics || [];
+  const activity = detail?.activity || [];
+  const notes = detail?.notes || [];
+  const ownership = detail?.ownership?.organizationIds || [];
+  const summary = detail?.summary || {};
+  const paidCents = orders.filter((item) => String(item.status || "").toLowerCase() === "paid").reduce((sum, item) => sum + Number(item.totalAmountCents || 0), 0);
   const tabs = [
     { id: "overview", short: "Overview", full: "Customer Overview", color: "#FCE9EC", border: "#E8B8C1" },
     { id: "services", short: "Services", full: "Assigned Services", color: "#E7F6EE", border: "#BFE5CD" },
@@ -561,7 +567,7 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
     { id: "notes", short: "Notes", full: "Internal Notes", color: "#F1F4E8", border: "#D4DDBB" },
     { id: "settings", short: "Settings", full: "Customer Settings", color: "#EEF1F5", border: "#CFD6E0" },
   ];
-  const serviceRows = customerServiceRows(deployments, orders, receipts);
+  const serviceRows = customerServiceRows(deployments, [], []);
   const accountName = account.username || account.name || account.email || account.id;
   const plan = account.plan || account.planId || "Starter";
 
@@ -610,14 +616,16 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
               <div className="stack" style={{ gap: 14 }}>
                 <CustomerProfileSection title="Customer summary">
                   <div className="customer-detail-grid">
-                    <CustomerMetric label="Deployments" value={deployments.length} note="Sites and apps assigned" />
+                    <CustomerMetric label="Services" value={summary.services ?? deployments.length} note="All assigned services" />
                     <CustomerMetric label="Orders" value={orders.length} note="Service requests" />
                     <CustomerMetric label="Receipts" value={receipts.length} note="Payment proof records" />
                     <CustomerMetric label="Paid" value={`$${(paidCents / 100).toFixed(2)}`} note="Confirmed revenue" />
                   </div>
                 </CustomerProfileSection>
                 <CustomerProfileSection title="Account profile">
-                  <CustomerKV k="Customer ID" v={account.id} />
+                  <CustomerKV k="Client ID" v={account.clientId} />
+                  <CustomerKV k="Internal User ID" v={account.id} />
+                  <CustomerKV k="Account scope" v={ownership.join(", ")} />
                   <CustomerKV k="Name" v={account.name || account.username} />
                   <CustomerKV k="Organization" v={account.organizationName || account.profileDetails?.organizationName} />
                   <CustomerKV k="Plan" v={plan} />
@@ -630,7 +638,7 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
                   <CustomerKV k="Status" v={account.status || account.accountStatus || "active"} />
                 </CustomerProfileSection>
                 <CustomerProfileSection title="Customer insight">
-                  <CustomerKV k="Service footprint" v={`${deployments.length} deployment(s), ${orders.length} order(s), ${receipts.length} receipt(s)`} />
+                  <CustomerKV k="Service footprint" v={`${deployments.length} service(s), ${orders.length} order(s), ${receipts.length} receipt(s)`} />
                   <CustomerKV k="Billing attention" v={orders.some((item) => String(item.status || "").toLowerCase() !== "paid") ? "Needs review" : "Clear"} />
                   <CustomerKV k="Receipt review" v={receipts.some((item) => String(item.status || "").toLowerCase() === "pending") ? "Pending approval" : "No pending receipt"} />
                 </CustomerProfileSection>
@@ -641,7 +649,7 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
           {!loading && activeTab === "services" && (
             <div className="cps-panel-content">
               <CustomerProfileSection title="Assigned services">
-                <CustomerServiceList deployments={deployments} orders={orders} receipts={receipts} />
+                <CustomerServiceList deployments={deployments} orders={[]} receipts={[]} />
               </CustomerProfileSection>
             </div>
           )}
@@ -651,7 +659,7 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
               <div className="stack" style={{ gap: 14 }}>
                 <CustomerProfileSection title="Analytics">
                   <div className="customer-detail-grid">
-                    <CustomerMetric label="Active services" value={deployments.filter((item) => String(item.status || "").toLowerCase() === "active").length} note="Currently live" />
+                    <CustomerMetric label="Active services" value={summary.activeServices ?? deployments.filter((item) => ["active", "live", "running"].includes(String(item.status || "").toLowerCase())).length} note="Currently live" />
                     <CustomerMetric label="Pending billing" value={orders.filter((item) => String(item.status || "").toLowerCase() !== "paid").length} note="Needs follow-up" />
                     <CustomerMetric label="Receipts pending" value={receipts.filter((item) => String(item.status || "").toLowerCase() === "pending").length} note="Awaiting approval" />
                     <CustomerMetric label="Plan" value={plan} note="Current account tier" />
@@ -660,9 +668,15 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
               </div>
               <div className="stack" style={{ gap: 14 }}>
                 <CustomerProfileSection title="Insights">
+                  <CustomerKV k="Analytics events" v={analytics.length} />
                   <CustomerKV k="Customer value" v={paidCents > 0 ? "Revenue confirmed" : "No confirmed revenue yet"} />
                   <CustomerKV k="Operational signal" v={deployments.length ? "Service relationship active" : "No service assigned"} />
                   <CustomerKV k="Next action" v={serviceRows.length ? "Review latest service state" : "Assign or onboard service"} />
+                </CustomerProfileSection>
+              </div>
+              <div className="stack" style={{ gap: 14 }}>
+                <CustomerProfileSection title="Database analytics events">
+                  <CustomerRecordList rows={analytics} empty="No analytics events recorded for this client." />
                 </CustomerProfileSection>
               </div>
             </div>
@@ -676,6 +690,8 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
                   <CustomerMetric label="Receipts" value={receipts.length} note="Uploaded proof" />
                   <CustomerMetric label="Paid" value={`$${(paidCents / 100).toFixed(2)}`} note="Confirmed" />
                   <CustomerMetric label="Pending" value={orders.filter((item) => String(item.status || "").toLowerCase() !== "paid").length} note="Open items" />
+                  <CustomerMetric label="Invoices" value={invoices.length} note="Issued records" />
+                  <CustomerMetric label="Subscriptions" value={subscriptions.length} note="Billing relationships" />
                 </div>
               </CustomerProfileSection>
               <CustomerProfileSection title="Orders and receipts">
@@ -687,11 +703,13 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
           {!loading && activeTab === "access" && (
             <div className="cps-panel-content talent-profile-body">
               <CustomerProfileSection title="Access record">
-                <CustomerKV k="Customer ID" v={account.id} />
+                <CustomerKV k="Client ID" v={account.clientId} />
+                <CustomerKV k="Internal User ID" v={account.id} />
                 <CustomerKV k="Email" v={account.email} />
                 <CustomerKV k="Username" v={account.username} />
                 <CustomerKV k="Role" v={account.role || "member"} />
                 <CustomerKV k="Status" v={account.status || account.accountStatus || "active"} />
+                <CustomerKV k="Owned organizations" v={ownership.join(", ")} />
               </CustomerProfileSection>
               <CustomerProfileSection title="Security and lifecycle">
                 <CustomerKV k="Created" v={account.createdAt ? new Date(account.createdAt).toLocaleString() : "-"} />
@@ -699,20 +717,26 @@ function CustomerDetailShell({ selected, detail, loading, activeTab, setActiveTa
                 <CustomerKV k="Disabled reason" v={account.disabledReason} />
                 <CustomerKV k="Deleted at" v={account.deletedAt ? new Date(account.deletedAt).toLocaleString() : ""} />
               </CustomerProfileSection>
+              <CustomerProfileSection title="Service access">
+                <CustomerAccessList services={deployments} />
+              </CustomerProfileSection>
             </div>
           )}
 
           {!loading && activeTab === "activity" && (
-            <div className="cps-panel-content">
-              <CustomerProfileSection title="Activity timeline">
-                <CustomerActivityList account={account} deployments={deployments} orders={orders} receipts={receipts} />
+            <div className="cps-panel-content stack" style={{ gap: 14 }}>
+              <CustomerProfileSection title="Customer UX activity">
+                <CustomerUxActivity analytics={analytics} />
+              </CustomerProfileSection>
+              <CustomerProfileSection title="Security and audit timeline">
+                <CustomerRecordList rows={activity} empty="No audit events recorded for this client." />
               </CustomerProfileSection>
             </div>
           )}
 
           {!loading && activeTab === "notes" && (
             <div className="cps-panel-content">
-              <CustomerEmptyState title="Internal notes" body="Customer notes, follow-up comments, and support observations will appear here once connected to the notes store." />
+              <CustomerRecordList rows={notes} empty="No private admin notes recorded for this client." />
             </div>
           )}
 
@@ -798,6 +822,85 @@ function CustomerActivityList({ account, deployments, orders, receipts }) {
   );
 }
 
+function CustomerRecordList({ rows = [], empty }) {
+  if (!rows.length) return <CustomerEmptyState title="No records" body={empty} />;
+  return (
+    <div className="customer-service-list">
+      {rows.map((row, index) => (
+        <div key={row.id || index} className="cps-submission-row customer-activity-row">
+          <div className="cps-submission-index">{index + 1}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>{row.body || row.action || row.eventType || row.message || row.name || "Recorded event"}</div>
+            <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+              {[row.entityType, row.entityId, row.adminUserId, row.actorUserId].filter(Boolean).join(" · ") || "Client account record"}
+              {row.createdAt ? " · " + new Date(row.createdAt).toLocaleString() : ""}
+            </div>
+          </div>
+          <StatusBadge status={row.status || "recorded"} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function parseAnalyticsMetadata(value) {
+  if (value && typeof value === "object") return value;
+  try { return JSON.parse(value || "{}"); } catch { return {}; }
+}
+
+function CustomerUxActivity({ analytics = [] }) {
+  const rows = analytics.map((row) => ({ ...row, parsed: parseAnalyticsMetadata(row.metadata) }));
+  const count = (type) => rows.filter((row) => row.eventType === type).length;
+  const serviceCounts = {};
+  const searchCounts = {};
+  const zoneCounts = {};
+  let maxScroll = 0;
+  for (const row of rows) {
+    if (row.eventType === "ux.service_used" && row.parsed.service) serviceCounts[row.parsed.service] = (serviceCounts[row.parsed.service] || 0) + 1;
+    if (row.eventType === "ux.search" && row.parsed.query) searchCounts[row.parsed.query] = (searchCounts[row.parsed.query] || 0) + 1;
+    if (row.eventType === "ux.pointer_summary") for (const [zone, value] of Object.entries(row.parsed.zoneCounts || {})) zoneCounts[zone] = (zoneCounts[zone] || 0) + Number(value || 0);
+    maxScroll = Math.max(maxScroll, Number(row.parsed.maxScrollPercent || 0));
+  }
+  const top = (map) => Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (!rows.length) return <CustomerEmptyState title="No UX telemetry" body="No authenticated customer interaction data has been recorded yet." />;
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div className="customer-detail-grid">
+        <CustomerMetric label="Page views" value={count("ux.page_view")} note="Tracked dashboard views" />
+        <CustomerMetric label="Clicks" value={count("ux.click")} note="Interactive controls" />
+        <CustomerMetric label="Searches" value={count("ux.search")} note="Search result sessions" />
+        <CustomerMetric label="Rage clicks" value={count("ux.rage_click")} note="Possible UI friction" />
+        <CustomerMetric label="UI errors" value={count("ux.ui_error")} note="Client-side failures" />
+        <CustomerMetric label="Max scroll" value={maxScroll + "%"} note="Deepest recorded page" />
+      </div>
+      <div className="customer-ux-grids">
+        <CustomerUxTable title="Most-used services" rows={top(serviceCounts)} empty="No service use recorded." />
+        <CustomerUxTable title="Dashboard searches" rows={top(searchCounts)} empty="No searches recorded." />
+        <CustomerUxTable title="Pointer heat zones" rows={top(zoneCounts)} empty="No pointer summaries recorded." />
+      </div>
+      <CustomerRecordList rows={rows} empty="No UX events recorded." />
+    </div>
+  );
+}
+
+function CustomerUxTable({ title, rows, empty }) {
+  return <div className="customer-ux-table"><strong>{title}</strong>{rows.length ? <table><tbody>{rows.map(([label, value]) => <tr key={label}><td>{label}</td><td className="mono">{value}</td></tr>)}</tbody></table> : <span>{empty}</span>}</div>;
+}
+
+function CustomerAccessList({ services = [] }) {
+  if (!services.length) return <CustomerEmptyState title="No service access" body="No service relationship is indexed for this client." />;
+  return (
+    <div className="customer-access-list">
+      {services.map((service) => (
+        <div key={service.id}>
+          <span>{service.serviceType || "Service"}</span>
+          <strong>{service.serviceName || service.name || service.id} · {service.accessStatus || "unindexed"} · {service.billingStatus || "billing unknown"} · {service.adminStatus || "allowed"}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CustomerEmptyState({ title, body }) {
   return (
     <div className="cps-empty-state">
@@ -809,7 +912,7 @@ function CustomerEmptyState({ title, body }) {
 
 function customerServiceRows(deployments, orders, receipts) {
   return [
-    ...deployments.map((item) => ({ type: "Deployment", name: item.name || item.id, status: item.status, date: item.createdAt })),
+    ...deployments.map((item) => ({ type: item.serviceType || "Service", name: item.serviceName || item.name || item.id, status: item.status || item.accessStatus, date: item.updatedAt || item.createdAt })),
     ...orders.map((item) => ({ type: "Order", name: item.description || item.id, status: item.status, date: item.createdAt })),
     ...receipts.map((item) => ({ type: "Receipt", name: item.reference || item.id, status: item.status, date: item.createdAt })),
   ];
@@ -1190,28 +1293,82 @@ function ActivityView() {
 
 // ── Hosting, Domains, VPS, Tickets — placeholders ─────────────────────────────
 
-function HostingView() {
+function AdminRelationshipView({ section, title, subtitle, tabs }) {
+  const [activeTab, setActiveTab] = React.useState(tabs[0].id);
+  const { data, loading, error } = useAdminData(() => window.HEYA_API.getControlPlaneSection(section));
+  const tab = tabs.find((item) => item.id === activeTab) || tabs[0];
+  const rows = data ? tab.rows(data) : [];
+  const columns = [
+    { key: "name", label: tab.primaryLabel || "Record", render: (row) => row.name || row.label || row.hostname || row.serviceName || row.action || row.eventType || row.id || "—" },
+    { key: "owner", label: "Client / UID", render: (row) => row.clientId || row.createdByUserId || row.userId || row.organizationId || row.actorUserId || "—" },
+    { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status || row.accountStatus || row.accessStatus || row.paymentStatus || "recorded"} /> },
+    { key: "detail", label: tab.detailLabel || "Details", render: (row) => tab.detail(row) },
+    { key: "updatedAt", label: "Updated", render: (row) => <FmtDate value={row.updatedAt || row.createdAt} /> },
+  ];
   return (
-    <AdminPage title="Hosting" subtitle="Manage customer web hosting plans and services.">
-      <PendingDataCard tab="Hosting" />
+    <AdminPage title={title} subtitle={subtitle}>
+      <div className="admin-relationship-tabs" role="tablist" aria-label={title + " sections"}>
+        {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={activeTab === item.id} className={activeTab === item.id ? "is-active" : ""} onClick={() => setActiveTab(item.id)}>{item.label}</button>)}
+      </div>
+      {loading ? <LoadingCard /> : error ? <ErrorCard message={error} /> : <div className="admin-relationship-panel">
+        <div className="admin-relationship-panel__head"><div><strong>{tab.label}</strong><span>{tab.description}</span></div><span className="mono">{rows.length} records</span></div>
+        <DataTable columns={columns} rows={rows} />
+      </div>}
     </AdminPage>
   );
 }
 
-function DomainsView() {
-  return (
-    <AdminPage title="Domains" subtitle="Domain registrations, DNS, and hosting domain assignments.">
-      <PendingDataCard tab="Domains" />
-    </AdminPage>
-  );
+const serviceRows = (data) => data.services || [];
+const billingRows = (data) => data.billing || [];
+const metadataValue = (row, ...keys) => keys.map((key) => row.metadata?.[key]).find((value) => value !== undefined && value !== null && value !== "") || "—";
+
+function HostingView() {
+  const tabs = [
+    { id: "services", label: "Hosting Services", description: "Every database-backed hosting UID and its lifecycle.", rows: serviceRows, primaryLabel: "Hosting UID", detail: (r) => r.url || r.providerServiceId || r.plan || "—" },
+    { id: "billing", label: "Billing / Usage", description: "Hosting plans, payment state, and usage-linked orders.", rows: (d) => [...serviceRows(d), ...billingRows(d)], detail: (r) => r.paymentStatus || r.totalAmountCents || r.totalPriceCents || r.plan || "—" },
+    { id: "source", label: "Repository & Branch", description: "Repository, branch, and upload source for each hosting UID.", rows: serviceRows, detail: (r) => [metadataValue(r, "repository", "repo", "repoName"), metadataValue(r, "branch")].join(" / ") },
+    { id: "logs", label: "Build Logs", description: "Build and deployment results for ZIP uploads and repository pulls.", rows: serviceRows, detail: (r) => metadataValue(r, "buildStatus", "lastBuildStatus", "failureReason") },
+  ];
+  return <AdminRelationshipView section="hosting" title="Hosting" subtitle="Hosting UIDs, billing, source repositories, branches, and build results." tabs={tabs} />;
 }
 
 function VpsView() {
-  return (
-    <AdminPage title="VPS Hosting" subtitle="Virtual private server allocations and management.">
-      <PendingDataCard tab="VPS Hosting" />
-    </AdminPage>
-  );
+  const tabs = [
+    { id: "services", label: "VPS Services", description: "Every VPS UID running for a client.", rows: serviceRows, primaryLabel: "VPS UID", detail: (r) => [r.region, r.plan, r.mainIp].filter(Boolean).join(" · ") || "—" },
+    { id: "billing", label: "Billing / Usage", description: "VPS rate, markup, plan, and payment state.", rows: (d) => [...serviceRows(d), ...billingRows(d)], detail: (r) => r.totalPriceCents || r.totalAmountCents || r.monthlyCostCents || r.paymentStatus || "—" },
+    { id: "setup", label: "Server Setup", description: "Safe server setup information; credentials are never included.", rows: serviceRows, detail: (r) => [r.vcpuCount && r.vcpuCount + " vCPU", r.ramMb && r.ramMb + " MB", r.diskGb && r.diskGb + " GB"].filter(Boolean).join(" · ") || r.osName || "—" },
+    { id: "reports", label: "Crash & Reports", description: "Recent VPS action failures and operational reports.", rows: (d) => serviceRows(d).flatMap((r) => (r.actionLogs || []).map((log) => ({ ...log, name: r.label || r.hostname, organizationId: r.organizationId }))), detail: (r) => r.errorMessage || r.action || "—" },
+  ];
+  return <AdminRelationshipView section="vps" title="VPS" subtitle="VPS UIDs, usage billing, server setup, and operational reports." tabs={tabs} />;
+}
+
+function DomainsView() {
+  const tabs = [
+    { id: "registered", label: "Registered Names", description: "Registered domain UIDs and lifecycle information.", rows: serviceRows, primaryLabel: "Domain", detail: (r) => r.providerServiceId || r.provider || r.expiresAt || "—" },
+    { id: "dns", label: "DNS Records", description: "DNS and verification data stored against each domain service.", rows: serviceRows, detail: (r) => metadataValue(r, "dnsStatus", "verificationStatus", "nameservers") },
+    { id: "billing", label: "Billing Info", description: "Registration, renewal, and domain billing records.", rows: (d) => [...serviceRows(d), ...billingRows(d)], detail: (r) => r.paymentStatus || r.totalAmountCents || r.totalPriceCents || r.billingCycle || "—" },
+  ];
+  return <AdminRelationshipView section="domains" title="Domain Names" subtitle="Registered names, DNS records, verification, renewals, and billing." tabs={tabs} />;
+}
+
+function EmailServicesView() {
+  const tabs = [
+    { id: "plans", label: "Plans & Billing", description: "Email service plans and related billing records.", rows: (d) => [...serviceRows(d), ...billingRows(d)], primaryLabel: "Email UID", detail: (r) => r.paymentStatus || r.totalAmountCents || r.totalPriceCents || r.billingCycle || "—" },
+    { id: "dns", label: "DNS Status", description: "Connected email-domain DNS and verification state.", rows: serviceRows, detail: (r) => metadataValue(r, "dnsStatus", "verificationStatus", "domain") },
+    { id: "mailboxes", label: "Mailboxes & Storage", description: "Mailbox totals and safe storage information per email domain.", rows: serviceRows, detail: (r) => metadataValue(r, "mailboxCount", "storageUsed", "storageLimit") },
+    { id: "reports", label: "Crash & Reports", description: "Email service incidents and provider reports.", rows: serviceRows, detail: (r) => metadataValue(r, "incident", "lastError", "report") },
+  ];
+  return <AdminRelationshipView section="email" title="Emails" subtitle="Email UIDs, billing, DNS status, mailboxes, storage, and reports." tabs={tabs} />;
+}
+
+function SecurityDataView() {
+  const tabs = [
+    { id: "activity", label: "Activities per UID", description: "Auditable user, client, service, and administrator actions.", rows: (d) => d.audit || [], primaryLabel: "Activity", detail: (r) => [r.entityType, r.entityId].filter(Boolean).join(" / ") || r.path || "—" },
+    { id: "analytics", label: "Customer Analytics", description: "Operational activity events kept separate from audit records.", rows: (d) => d.analytics || [], detail: (r) => r.eventType || r.path || "—" },
+    { id: "incidents", label: "Incidents", description: "Service health, crash, and incident records.", rows: (d) => d.incidents || [], detail: (r) => r.summary || r.description || r.severity || "—" },
+    { id: "watchdog", label: "Watchdog", description: "Security-relevant warnings and review state.", rows: (d) => d.watchdog || [], detail: (r) => r.message || r.severity || "—" },
+  ];
+  return <AdminRelationshipView section="security" title="Security Data" subtitle="Activities by UID, analytics, incidents, and watchdog events." tabs={tabs} />;
 }
 
 function TicketsView() {
@@ -1289,5 +1446,7 @@ window.ActivityView      = ActivityView;
 window.HostingView       = HostingView;
 window.DomainsView       = DomainsView;
 window.VpsView           = VpsView;
+window.EmailServicesView = EmailServicesView;
+window.SecurityDataView  = SecurityDataView;
 window.TicketsView       = TicketsView;
 window.AdminSettingsView = AdminSettingsView;

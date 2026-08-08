@@ -2,6 +2,7 @@ import express from 'express';
 import * as ctrl from '../controllers/vpsHostingController.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import { requireServiceAccess } from '../middleware/serviceAccess.middleware.js';
+import { paymentLifecycleMiddleware } from '../middleware/billing.middleware.js';
 
 const router = express.Router();
 
@@ -18,12 +19,22 @@ router.post('/quote',             ctrl.quote);
 // ── Service creation + payment (auth required but no access row yet) ─────────
 router.post('/services',          authMiddleware, ctrl.createService);
 router.post('/paypal/create-order', authMiddleware, ctrl.createPaypalOrder);
-router.post('/paypal/capture',      authMiddleware, ctrl.capturePaypalOrder);
+router.post(
+  '/paypal/capture',
+  authMiddleware,
+  paymentLifecycleMiddleware({ provider: 'paypal', source: 'vps_paypal_capture' }),
+  ctrl.capturePaypalOrder,
+);
 
 // ── Service list (auth, ownership enforced in controller) ─────────────────────
 router.get('/services',               authMiddleware, ctrl.listServices);
 
 // ── Individual service management — require active ServiceAccess ──────────────
+router.get('/services/:id/summary',
+  authMiddleware,
+  requireServiceAccess('vps', vpsServiceId),
+  ctrl.getServiceSummary);
+
 // Read-only details: auth + access check
 router.get('/services/:id',
   authMiddleware,
@@ -35,6 +46,11 @@ router.get('/services/:id/credentials',
   authMiddleware,
   requireServiceAccess('vps', vpsServiceId),
   ctrl.getServiceCredentials);
+
+router.patch('/services/:id/settings',
+  authMiddleware,
+  requireServiceAccess('vps', vpsServiceId),
+  ctrl.updateServiceSettings);
 
 // Mutating actions: auth + access check
 router.post('/services/:id/start',
@@ -59,6 +75,7 @@ router.delete('/services/:id',
 
 // ── SSH keys (auth only — not tied to a single service ID) ────────────────────
 router.get('/ssh-keys',               authMiddleware, ctrl.listSshKeys);
+router.post('/ssh-keys',              authMiddleware, ctrl.createSshKey);
 router.delete('/ssh-keys/:keyId',     authMiddleware, ctrl.deleteSshKey);
 
 // ── Bandwidth / snapshots / backup / resize ───────────────────────────────────
@@ -68,6 +85,11 @@ router.get('/services/:id/bandwidth',
   ctrl.getBandwidth);
 
 router.get('/snapshots',              authMiddleware, ctrl.listSnapshots);
+
+router.get('/services/:id/snapshots',
+  authMiddleware,
+  requireServiceAccess('vps', vpsServiceId),
+  ctrl.listServiceSnapshots);
 
 router.post('/services/:id/snapshots',
   authMiddleware,

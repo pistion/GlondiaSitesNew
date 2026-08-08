@@ -95,8 +95,10 @@ function emptyStore() {
     sessions: [],
     logs: {},
     env: {},
+    headers: {},
     disks: {},
     domains: {},
+    webhooks: {},
     checkoutOrders: [],
     payments: [],
   };

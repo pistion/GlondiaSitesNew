@@ -1,51 +1,35 @@
 import { prisma } from './db.js';
 import { calcPricing } from './vpsPricingService.js';
 import * as vultr from './vultrApiService.js';
+import {
+  createPaypalOrderWithOptionalVault,
+  savePaymentMethodFromCapture,
+} from './paymentMethodService.js';
+import { recordPaymentTransaction } from './billingRecordsService.js';
 
-const SANDBOX     = String(process.env.PAYPAL_SANDBOX ?? 'true').toLowerCase() !== 'false';
-const BASE        = SANDBOX ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
 const FRONTEND    = process.env.FRONTEND_URL || 'http://localhost:5173';
-
-let _token = null;
-let _tokenExpiry = 0;
-
-async function getToken() {
-  if (_token && Date.now() < _tokenExpiry) return _token;
-  const id  = process.env.PAYPAL_CLIENT_ID     || '';
-  const sec = process.env.PAYPAL_CLIENT_SECRET || '';
-  if (!id || !sec) throw Object.assign(new Error('PayPal is not configured.'), { status: 400 });
-  const res = await fetch(`${BASE}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${id}:${sec}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-  if (!res.ok) throw Object.assign(new Error('Failed to authenticate with PayPal.'), { status: 400 });
-  const data = await res.json();
-  _token = data.access_token;
-  _tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return _token;
-}
 
 /**
  * Creates a PayPal order and a CheckoutOrder DB record (status=pending).
  * Stores provisionDetails server-side so capture never trusts the client.
  */
 export async function createOrder(organizationId, userId, dto) {
-  const plans = await vultr.listPlans();
+  const plans = await vultr.listPlans(undefined, { region: dto.region });
   const plan = plans.find((p) => p.id === dto.plan);
-  if (!plan) throw Object.assign(new Error(`Plan "${dto.plan}" not found.`), { status: 404 });
+  if (!plan) {
+    throw Object.assign(
+      new Error(`Plan "${dto.plan}" is not available in region "${dto.region}". Choose an available plan for this location.`),
+      { status: 400 },
+    );
+  }
 
   const { baseCents, mkupCents, totalCents, markup } = calcPricing(plan.monthly_cost);
   const totalAmount = (totalCents / 100).toFixed(2);
-  const token = await getToken();
 
-  const ppRes = await fetch(`${BASE}/v2/checkout/orders`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify({
+  let order;
+  let approvalUrl;
+  try {
+    const created = await createPaypalOrderWithOptionalVault({
       intent: 'CAPTURE',
       purchase_units: [{
         reference_id: `vps-${organizationId}-${Date.now()}`,
@@ -68,17 +52,13 @@ export async function createOrder(organizationId, userId, dto) {
         return_url: `${FRONTEND}/dashboard/hosting?vps=success`,
         cancel_url: `${FRONTEND}/dashboard/hosting?vps=cancelled`,
       },
-    }),
-  });
-
-  if (!ppRes.ok) {
-    const body = await ppRes.text();
-    console.error('[paypal] createOrder failed:', body);
+    });
+    order = { id: created.id };
+    approvalUrl = created.approvalUrl;
+  } catch (err) {
+    console.error('[paypal] createOrder failed:', err.message);
     throw Object.assign(new Error('Failed to create PayPal order. Please try again.'), { status: 400 });
   }
-
-  const order = await ppRes.json();
-  const approvalUrl = order.links?.find((l) => l.rel === 'approve')?.href;
 
   // Store provision details and expected amount server-side
   const provisionDetails = {
@@ -137,19 +117,15 @@ export async function captureOrder(organizationId, paypalOrderId) {
     return { checkoutOrder, captureRecord: meta.paypalCapture, provisionDetails: meta.provisionDetails };
   }
 
-  const token = await getToken();
-  const captureRes = await fetch(`${BASE}/v2/checkout/orders/${paypalOrderId}/capture`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  });
-
-  if (!captureRes.ok) {
-    const body = await captureRes.text();
-    console.error('[paypal] capture failed:', body);
+  const { capturePaypalOrderRaw } = await import('./paymentMethodService.js');
+  let capture;
+  try {
+    capture = await capturePaypalOrderRaw(paypalOrderId);
+  } catch (err) {
+    console.error('[paypal] capture failed:', err.message);
     throw Object.assign(new Error('PayPal payment capture failed. Please try again.'), { status: 400 });
   }
 
-  const capture = await captureRes.json();
   const captureRecord = capture.purchase_units?.[0]?.payments?.captures?.[0];
 
   if (!captureRecord || captureRecord.status !== 'COMPLETED') {
@@ -179,6 +155,21 @@ export async function captureOrder(organizationId, paypalOrderId) {
       providerCaptureId: captureRecord.id,
       metadata:          JSON.stringify(updatedMeta),
     },
+  });
+  await recordPaymentTransaction({
+    order: updated,
+    providerTransactionId: captureRecord.id,
+    provider: 'paypal',
+    status: 'completed',
+    metadata: { paypalOrderId },
+  });
+
+  // Best-effort: save vaulted method for shared wallet reuse.
+  await savePaymentMethodFromCapture({
+    userId: checkoutOrder.userId,
+    organizationId,
+    capturePayload: capture,
+    productType: 'vps',
   });
 
   return { checkoutOrder: updated, captureRecord, provisionDetails: meta.provisionDetails };

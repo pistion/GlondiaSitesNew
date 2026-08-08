@@ -28,6 +28,12 @@ function notConfiguredPayload(message) {
   };
 }
 
+function providerErrorStatus(error) {
+  const status = Number(error?.status || 502);
+  if (status === 401 || status === 403) return 502;
+  return status >= 400 && status < 600 ? status : 502;
+}
+
 const DomainSearchController = {
   searchAvailability: async (req, res) => {
     const raw = String(req.query.query || req.query.q || '').trim();
@@ -79,12 +85,11 @@ const DomainSearchController = {
         results,
       });
     } catch (error) {
-      const status = error.status || 502;
       return res.error(
         'PROVIDER_ERROR',
         error.message || 'Domain search failed.',
-        status >= 400 && status < 600 ? status : 502,
-        { configured: true }
+        providerErrorStatus(error),
+        { configured: true, providerStatus: error.providerStatus || null }
       );
     }
   },
@@ -133,7 +138,12 @@ const DomainSearchController = {
         }));
       return res.ok({ configured: true, suggestions });
     } catch (error) {
-      return res.error('PROVIDER_ERROR', error.message || 'Could not load suggestions.', error.status || 502);
+      return res.error(
+        'PROVIDER_ERROR',
+        error.message || 'Could not load suggestions.',
+        providerErrorStatus(error),
+        { configured: true, providerStatus: error.providerStatus || null }
+      );
     }
   },
 };

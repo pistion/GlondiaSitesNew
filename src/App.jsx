@@ -18,8 +18,9 @@ import {
   TweakButton 
 } from './tweaks-panel';
 import { Overview } from './overview';
+import { ProjectWorkspace } from './project-workspace';
 import { HostingList, HostingDetail } from './hosting-control';
-import { DomainsMine, DomainsBuy, DnsEditor } from './domains';
+import { DomainsMine, DomainsBuy, DnsEditor, DomainSettings } from './domains';
 import {
   BuilderGallery, BuilderTemplates, BuilderRoxanne, BuilderImport,
   BuilderEditor, BuilderAiIntake, BuilderDeploymentSettings, BuilderSitePlan,
@@ -29,12 +30,15 @@ import { ActivityPage } from './activity';
 import BillingPage from './features/billing/BillingPage.jsx';
 import ProfilePage from './features/profile/ProfilePage.jsx';
 import EmailManagementPage from './features/email/EmailManagementPage.jsx';
+import { MailboxesPage, MailboxSettingsPage } from './features/email/MailboxesPage.jsx';
 import GlondiaMailApp from './features/glondia-mail/GlondiaMailApp.jsx';
 import { VpsHostingList, VpsCreateWizard, VpsDetail } from './vps-hosting';
+import { CloudStorageList, CloudStorageCreate, CloudStorageDetail, CloudDriveDashboard } from './cloud-storage';
 import SupportPage from './features/tickets/TicketsPage.jsx';
+import ServiceSandboxPage from './features/sandbox/ServiceSandboxPage.jsx';
 import { isFeatureEnabled } from './app/features.js';
 import { notifyDataChanged } from './api';
-import { isAuthenticated, clearAuthSession, getStoredAuth, storeAuthSession, AUTH_CHANGED_EVENT, login as authLogin } from './api/auth.js';
+import { isAuthenticated, clearAuthSession, getStoredAuth, storeAuthSession, restoreSession, watchAccessTokenExpiry, AUTH_CHANGED_EVENT, login as authLogin } from './api/auth.js';
 import { isLiveMode } from './app/config.js';
 import { isViewComingSoon } from './app/features.js';
 import LoginPage from './features/auth/LoginPage.jsx';
@@ -64,11 +68,15 @@ const VIEW_TO_PATH = {
   'builder-gallery': 'site-builder',
   activity: 'activity',
   billing: 'billing',
+  sandbox: 'sandbox',
   email: 'email',
+  'email-mailboxes': 'email/mailboxes',
   profile: 'profile',
   settings: 'settings',
   'vps-hosting': 'vps-services',
   'vps-create': 'vps-services/new',
+  'cloud-storage': 'cloud-storage',
+  'cloud-storage-create': 'cloud-storage/new',
   support: 'support',
 };
 
@@ -80,11 +88,15 @@ const PATH_TO_VIEW = {
   'site-builder': 'builder-gallery',
   activity: 'activity',
   billing: 'billing',
+  sandbox: 'sandbox',
   email: 'email',
+  'email/mailboxes': 'email-mailboxes',
   profile: 'profile',
   settings: 'settings',
   'vps-services': 'vps-hosting',
   'vps-services/new': 'vps-create',
+  'cloud-storage': 'cloud-storage',
+  'cloud-storage/new': 'cloud-storage-create',
   'cloud-servers': 'vps-hosting',
   'cloud-servers/new': 'vps-create',
   support: 'support',
@@ -99,11 +111,17 @@ function accountPathFor(route, user = getStoredAuth().user) {
   const clientId = accountClientId(user);
   if (!clientId || !route || route.view === 'login' || route.view === 'signup') return null;
 
+  if (route.view === 'project-workspace' && route.params?.projectId) {
+    const tab = route.params.tab || 'overview';
+    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/projects/${encodeURIComponent(route.params.projectId)}/${encodeURIComponent(tab)}`;
+  }
+
   if (route.view === 'hosting-detail' && route.params?.id) {
     return `/${CLIENT_ROUTE_PREFIX}/${clientId}/hosting/${encodeURIComponent(route.params.id)}`;
   }
   if (route.view === 'dns' && route.params?.domain) {
-    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/domains/${encodeURIComponent(route.params.domain)}/dns`;
+    const section = route.params?.section === 'settings' ? 'settings' : 'records';
+    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/domains/${encodeURIComponent(route.params.domain)}/${section}`;
   }
   if (route.view === 'builder-editor' && (route.params?.siteId || route.params?.id)) {
     return `/${CLIENT_ROUTE_PREFIX}/${clientId}/site-builder/editor/${encodeURIComponent(route.params.siteId || route.params.id)}`;
@@ -136,6 +154,16 @@ function accountPathFor(route, user = getStoredAuth().user) {
   if (route.view === 'vps-detail' && route.params?.id) {
     return `/${CLIENT_ROUTE_PREFIX}/${clientId}/vps-services/${encodeURIComponent(route.params.id)}`;
   }
+  if (route.view === 'cloud-storage-detail' && route.params?.id) {
+    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/cloud-storage/${encodeURIComponent(route.params.id)}`;
+  }
+  if (route.view === 'cloud-drive' && route.params?.id) {
+    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/cloud-storage/${encodeURIComponent(route.params.id)}/drive`;
+  }
+  if (route.view === 'email-mailbox-detail' && route.params?.id) {
+    const tab = route.params.tab || 'overview';
+    return `/${CLIENT_ROUTE_PREFIX}/${clientId}/email/mailboxes/${encodeURIComponent(route.params.id)}/${encodeURIComponent(tab)}`;
+  }
 
   const suffix = VIEW_TO_PATH[route.view];
   if (suffix === undefined) return `/${CLIENT_ROUTE_PREFIX}/${clientId}`;
@@ -148,10 +176,17 @@ function routeFromAccountPath(pathname = window.location.pathname) {
   const rest = parts.slice(2).map((p) => decodeURIComponent(p));
   const key = rest.join('/');
 
+  if (rest[0] === 'projects' && rest[1]) return { view: 'project-workspace', params: { projectId: rest[1], tab: rest[2] || 'overview' } };
+
   if (key === 'hosting/github-upload') return { view: 'builder-import', params: { mode: 'github' } };
   if (key === 'hosting/zip-upload') return { view: 'builder-import', params: { mode: 'zip' } };
   if (rest[0] === 'hosting' && rest[1]) return { view: 'hosting-detail', params: { id: rest[1] } };
-  if (rest[0] === 'domains' && rest[1] && rest[2] === 'dns') return { view: 'dns', params: { domain: rest[1] } };
+  if (rest[0] === 'domains' && rest[1] && ['dns', 'records', 'settings'].includes(rest[2])) {
+    return { view: 'dns', params: { domain: rest[1], section: rest[2] === 'settings' ? 'settings' : 'records' } };
+  }
+  if (rest[0] === 'email' && rest[1] === 'mailboxes' && rest[2]) {
+    return { view: 'email-mailbox-detail', params: { id: rest[2], tab: rest[3] || 'overview' } };
+  }
   if (rest[0] === 'site-builder' && rest[1] === 'projects') {
     if (rest[2]) return { view: 'builder-project', params: { projectId: rest[2], step: rest[3] || 'plan' } };
     return { view: 'builder-project', params: {} };
@@ -164,6 +199,8 @@ function routeFromAccountPath(pathname = window.location.pathname) {
   if (key === 'site-builder/deploy') return { view: 'builder-deployment-settings' };
   if (rest[0] === 'site-builder' && rest[1] === 'editor' && rest[2]) return { view: 'builder-editor', params: { id: rest[2], siteId: rest[2] } };
   if ((rest[0] === 'vps-services' || rest[0] === 'cloud-servers') && rest[1] && rest[1] !== 'new') return { view: 'vps-detail', params: { id: rest[1] } };
+  if (rest[0] === 'cloud-storage' && rest[1] && rest[2] === 'drive') return { view: 'cloud-drive', params: { id: rest[1] } };
+  if (rest[0] === 'cloud-storage' && rest[1] && rest[1] !== 'new') return { view: 'cloud-storage-detail', params: { id: rest[1] } };
 
   return { view: PATH_TO_VIEW[key] || 'overview' };
 }
@@ -255,14 +292,43 @@ function ClientDashboardApp() {
   const [route, setRoute] = useStateApp(() => routeFromAccountPath() || { view: "login" });
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [githubBanner, setGithubBanner] = useStateApp(null);
-  const [authed, setAuthed] = useStateApp(isAuthenticated());
+  const [authed, setAuthed] = useStateApp(false);
+  const [authReady, setAuthReady] = useStateApp(!isLiveMode());
   // Mobile sidebar drawer open/closed (desktop ignores this).
   const [mobileNavOpen, setMobileNavOpen] = useStateApp(false);
 
   useEffectApp(() => {
-    const sync = () => setAuthed(isAuthenticated());
+    const sync = () => {
+      setAuthed(isAuthenticated());
+      setAuthReady(true);
+    };
     window.addEventListener(AUTH_CHANGED_EVENT, sync);
     return () => window.removeEventListener(AUTH_CHANGED_EVENT, sync);
+  }, []);
+
+  useEffectApp(() => {
+    if (!isLiveMode()) return undefined;
+    return watchAccessTokenExpiry();
+  }, []);
+
+  useEffectApp(() => {
+    if (!isLiveMode()) return;
+    let alive = true;
+    let retryTimer = null;
+    const verify = () => restoreSession({ attempts: 5 })
+      .then((user) => {
+        if (!alive) return;
+        setAuthed(Boolean(user));
+        setAuthReady(true);
+      })
+      .catch((error) => {
+        if (!alive) return;
+        console.error('[auth] session restore delayed:', error.message);
+        setAuthReady(false);
+        retryTimer = window.setTimeout(verify, 2500);
+      });
+    verify();
+    return () => { alive = false; if (retryTimer) window.clearTimeout(retryTimer); };
   }, []);
 
   useEffectApp(() => {
@@ -367,7 +433,8 @@ function ClientDashboardApp() {
 
   useEffectApp(() => { window.scrollTo({ top: 0, behavior: "instant" }); }, [route.view, route.params?.id]);
 
-  const navigate = (r, options = {}) => {
+  const commitNavigation = (r, options = {}) => {
+    const fromPath = window.location.pathname;
     setRoute(r);
     const nextPath = accountPathFor(r, options.user);
     if (nextPath && nextPath !== window.location.pathname) {
@@ -375,21 +442,37 @@ function ClientDashboardApp() {
       if (options.replace) window.history.replaceState({}, '', nextUrl);
       else window.history.pushState({}, '', nextUrl);
     }
+    window.dispatchEvent(new CustomEvent('glondia:ux-navigation', { detail: { fromPath, toPath: window.location.pathname, service: r.view } }));
+  };
+  const navigate = (r, options = {}) => {
+    const navigationEvent = new CustomEvent('glondia:before-navigation', {
+      cancelable: true,
+      detail: {
+        target: r,
+        continueNavigation: () => commitNavigation(r, options),
+      },
+    });
+    if (!window.dispatchEvent(navigationEvent)) return;
+    commitNavigation(r, options);
   };
   const toggleTheme = () => setTweak("theme", t.theme === "dark" ? "light" : "dark");
 
   const DASHBOARD_VIEWS = new Set([
-    "overview","hosting-list","hosting-detail","domains-mine","domains-buy","dns",
+    "overview","project-workspace","hosting-list","hosting-detail","domains-mine","domains-buy","dns",
     "builder-gallery","builder-templates","builder-roxanne","builder-import","builder-editor","builder-ai-intake","builder-deployment-settings","builder-site-plan","builder-project",
-    "analytics","activity","billing","email","settings","profile","vps-hosting","vps-create","vps-detail",
+    "analytics","activity","billing","sandbox","email","email-mailboxes","email-mailbox-detail","settings","profile","vps-hosting","vps-create","vps-detail",
+    "cloud-storage","cloud-storage-create","cloud-storage-detail","cloud-drive",
     "support",
   ]);
 
   // Render — in demo/dev mode skip auth gate entirely; real JWT check only in live mode
-  const isAuthBlocked = isLiveMode() && DASHBOARD_VIEWS.has(route.view) && !authed;
+  const isAuthBlocked = isLiveMode() && DASHBOARD_VIEWS.has(route.view) && (!authReady || !authed);
 
   const renderView = () => {
-    if (isAuthBlocked) return <LoginPage navigate={navigate} />;
+    if (isAuthBlocked) {
+      if (!authReady) return <div className="auth-page"><div className="auth-shell"><main className="auth-card"><div className="auth-card-body">Restoring your secure session…</div></main></div></div>;
+      return <LoginPage navigate={navigate} />;
+    }
 
     // Non-MVP surfaces are gated behind Coming Soon instead of broken pages.
     if (isViewComingSoon(route.view)) return <ComingSoon navigate={navigate} />;
@@ -398,16 +481,19 @@ function ClientDashboardApp() {
       case "login":             return authed ? (() => { navigate({ view: 'overview' }, { replace: true }); return null; })() : <LoginPage navigate={navigate} />;
       case "signup":            return authed ? (() => { navigate({ view: 'overview' }, { replace: true }); return null; })() : <SignupPage navigate={navigate} />;
       case "overview":          return <Overview navigate={navigate} />;
+      case "project-workspace": return <ProjectWorkspace projectId={route.params?.projectId} initialTab={route.params?.tab || 'overview'} navigate={navigate} />;
       case "hosting-list":      return <HostingList navigate={navigate} />;
       case "hosting-detail":    return <HostingDetail id={route.params?.id} navigate={navigate} />;
       case "domains-mine":      return <DomainsMine navigate={navigate} />;
       case "domains-buy":       return <DomainsBuy navigate={navigate} />;
-      case "dns":               return <DnsEditor domain={route.params?.domain || ""} navigate={navigate} />;
+      case "dns":               return route.params?.section === 'settings'
+        ? <DomainSettings domain={route.params?.domain || ""} navigate={navigate} />
+        : <DnsEditor domain={route.params?.domain || ""} navigate={navigate} />;
       case "builder-gallery":   return <BuilderGallery navigate={navigate} />;
       case "builder-project":   return <BuilderProjectShell projectId={route.params?.projectId || null} step={route.params?.step || "plan"} navigate={navigate} />;
       case "builder-templates": return <BuilderTemplates navigate={navigate} />;
       case "builder-roxanne":   return <BuilderRoxanne navigate={navigate} />;
-      case "builder-import":    return <BuilderImport mode={route.params?.mode || "github"} navigate={navigate} />;
+      case "builder-import":    return <BuilderImport mode={route.params?.mode || "github"} hostingTarget={route.params?.hostingTarget || "shared"} dedicatedPlan={route.params?.dedicatedPlan || null} initialProjectId={route.params?.projectId || ''} navigate={navigate} />;
       case "builder-ai-intake":              return <BuilderAiIntake templateId={route.params?.templateId || ""} templateType={route.params?.templateType || "html"} navigate={navigate} />;
       case "builder-site-plan":              return <BuilderSitePlan templateId={route.params?.templateId || ""} templateType={route.params?.templateType || "repo-template"} navigate={navigate} />;
       case "builder-deployment-settings":    return <BuilderDeploymentSettings siteId={route.params?.siteId || null} templateId={route.params?.templateId || ""} templateType={route.params?.templateType || "html"} navigate={navigate} />;
@@ -415,12 +501,19 @@ function ClientDashboardApp() {
       case "analytics":         return <SimplePage title="Analytics" body="Cross-project analytics — coming up next." />;
       case "activity":          return <ActivityPage />;
       case "billing":           return <BillingPage navigate={navigate} />;
+      case "sandbox":           return <ServiceSandboxPage navigate={navigate} />;
       case "email":             return <EmailManagementPage navigate={navigate} />;
+      case "email-mailboxes":    return <MailboxesPage navigate={navigate} />;
+      case "email-mailbox-detail": return <MailboxSettingsPage mailboxId={route.params?.id} initialTab={route.params?.tab || 'overview'} navigate={navigate} />;
       case "profile":           return <ProfilePage navigate={navigate} theme={t.theme} onThemeChange={(v) => { setTweak('theme', v); try { localStorage.setItem('glondia-theme', v); } catch {} }} />;
       case "settings":          return <SimplePage title="Settings" body="Workspace settings — coming up next." />;
       case "vps-hosting":       return <VpsHostingList navigate={navigate} />;
-      case "vps-create":        return <VpsCreateWizard navigate={navigate} initialPlan={route.params?.plan || ''} initialPlanType={route.params?.planType || ''} />;
+      case "vps-create":        return <VpsCreateWizard navigate={navigate} initialPlan={route.params?.plan || ''} initialPlanType={route.params?.planType || ''} initialProjectId={route.params?.projectId || ''} />;
       case "vps-detail":        return <VpsDetail id={route.params?.id} navigate={navigate} />;
+      case "cloud-storage":     return <CloudStorageList navigate={navigate} />;
+      case "cloud-storage-create": return <CloudStorageCreate navigate={navigate} initialKind={route.params?.kind || 'postgres'} initialProjectId={route.params?.projectId || ''} />;
+      case "cloud-storage-detail": return <CloudStorageDetail id={route.params?.id} navigate={navigate} />;
+      case "cloud-drive":         return <CloudDriveDashboard id={route.params?.id} navigate={navigate} />;
       case "support":           return <SupportPage initialTicketId={route.params?.ticketId || null} />;
       default:
         window.location.href = "/";
@@ -430,13 +523,17 @@ function ClientDashboardApp() {
 
   // Sidebar key
   const activeKey = (() => {
+    if (route.view === 'project-workspace') return 'overview';
     if (route.view.startsWith("hosting")) return "hosting";
     if (route.view === "builder-import") return "hosting";
     if (route.view.startsWith("vps")) return "vps-hosting";
+    if (route.view.startsWith("cloud-storage")) return "cloud-storage";
     if (route.view === "support") return "support";
     if (route.view === "domains-mine") return "domains";
     if (route.view === "domains-buy") return "buy";
     if (route.view === "dns") return "domains";
+    if (route.view === "email-mailboxes" || route.view === "email-mailbox-detail") return "email-mailboxes";
+    if (route.view === "email") return "email";
     if (route.view.startsWith("builder")) return "builder";
     return route.view;
   })();
@@ -444,11 +541,12 @@ function ClientDashboardApp() {
   const crumbs = (() => {
     switch (route.view) {
       case "overview":        return [{ label: "Workspace" }, { label: "Overview" }];
+      case "project-workspace": return [{ label: "Projects", onClick: () => navigate({ view: "overview" }) }, { label: route.params?.projectId || "Project" }, { label: route.params?.tab || "Overview" }];
       case "hosting-list":    return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Hosting" }];
       case "hosting-detail":  return [{ label: "Hosting", onClick: () => navigate({ view: "hosting-list" }) }, { label: route.params?.id || "project" }];
       case "domains-mine":    return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "My domains" }];
       case "domains-buy":     return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Buy a domain" }];
-      case "dns":             return [{ label: "My domains", onClick: () => navigate({ view: "domains-mine" }) }, { label: route.params?.domain || "Domain settings" }, { label: "DNS records" }];
+      case "dns":             return [{ label: "My domains", onClick: () => navigate({ view: "domains-mine" }) }, { label: route.params?.domain || "Domain" }, { label: route.params?.section === 'settings' ? "Settings" : "Records" }];
       case "builder-gallery":    return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Site builder" }];
       case "builder-ai-intake":           return [{ label: "Site builder", onClick: () => navigate({ view: "builder-gallery" }) }, { label: "Template setup" }];
       case "builder-site-plan":           return [{ label: "Site builder", onClick: () => navigate({ view: "builder-gallery" }) }, { label: "Plan" }];
@@ -458,17 +556,23 @@ function ClientDashboardApp() {
       case "builder-import":  return [{ label: "Hosting", onClick: () => navigate({ view: "hosting-list" }) }, { label: route.params?.mode === "zip" ? "ZIP upload" : "GitHub upload" }];
       case "builder-editor":  return [{ label: "Templates", onClick: () => navigate({ view: "builder-templates" }) }, { label: "Editor" }];
       case "billing":         return [{ label: "Workspace" }, { label: "Billing" }];
+      case "sandbox":         return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Service Sandbox" }];
       case "email":           return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Business Email" }];
+      case "email-mailboxes":  return [{ label: "Business Email", onClick: () => navigate({ view: "email" }) }, { label: "My emails" }];
+      case "email-mailbox-detail": return [{ label: "Business Email", onClick: () => navigate({ view: "email" }) }, { label: "My emails", onClick: () => navigate({ view: "email-mailboxes" }) }, { label: "Mailbox settings" }];
       case "profile":         return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Profile" }];
       case "vps-hosting":    return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "VPS Services" }];
       case "vps-create":     return [{ label: "VPS Services", onClick: () => navigate({ view: "vps-hosting" }) }, { label: "New server" }];
       case "vps-detail":     return [{ label: "VPS Services", onClick: () => navigate({ view: "vps-hosting" }) }, { label: route.params?.id || "Server" }];
+      case "cloud-storage":  return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Cloud Storage" }];
+      case "cloud-storage-create": return [{ label: "Cloud Storage", onClick: () => navigate({ view: "cloud-storage" }) }, { label: "New service" }];
+      case "cloud-storage-detail": return [{ label: "Cloud Storage", onClick: () => navigate({ view: "cloud-storage" }) }, { label: route.params?.id || "Service" }];
       case "support":        return [{ label: "Workspace", onClick: () => navigate({ view: "overview" }) }, { label: "Contact support" }];
       default:                return [{ label: "Workspace" }];
     }
   })();
 
-  const isFullPageView = route.view === "login" || route.view === "signup" || isAuthBlocked;
+  const isFullPageView = route.view === "login" || route.view === "signup" || route.view === "cloud-drive" || isAuthBlocked;
 
   return (
     <>
@@ -497,7 +601,7 @@ function ClientDashboardApp() {
             {mobileNavOpen && <button className="dash-backdrop" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation" />}
             <main className="dash-main">
               <DashTopbar crumbs={crumbs} navigate={navigate} theme={t.theme} toggleTheme={toggleTheme} onOpenNav={() => setMobileNavOpen(true)} />
-              <div className="dash-body">
+              <div key={route.view} className="dash-body dashboard-view-enter">
                 <RouteErrorBoundary routeKey={`${route.view}:${route.params?.id || ""}:${route.params?.siteId || ""}`} navigate={navigate}>
                   {renderView()}
                 </RouteErrorBoundary>

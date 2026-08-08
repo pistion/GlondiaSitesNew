@@ -113,10 +113,20 @@ export function BuilderTemplates({ navigate }) {
   return (
     <>
       <div className="page-head">
-        <div>
-          <div className="page-eyebrow">Site builder</div>
-          <h1>Pick a template</h1>
-          <p className="sub">Choose a real template, preview it, customize it with AI, then deploy it to your domain.</p>
+        <div className="builder-subpage-head">
+          <button
+            className="builder-projects-back"
+            type="button"
+            onClick={() => navigate({ view: 'builder-gallery' })}
+            title="Back to Site Builder"
+          >
+            <ICN.ArrowLeft size={18} />
+          </button>
+          <div>
+            <div className="page-eyebrow">Site builder</div>
+            <h1>Pick a template</h1>
+            <p className="sub">Choose a real template, preview it, customize it with AI, then deploy it to your domain.</p>
+          </div>
         </div>
       </div>
 

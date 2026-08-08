@@ -11,6 +11,7 @@ import { Empty, StatusBadge } from '../../components';
 import {
   listTickets, createTicket, getTicket, sendTicketMessage, markTicketSeen,
 } from '../../api/tickets.js';
+import SandboxBanner from '../sandbox/SandboxBanner.jsx';
 
 const CATEGORIES = ['general', 'billing', 'hosting', 'domain', 'vps', 'email', 'account', 'complaint'];
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
@@ -208,6 +209,8 @@ export default function SupportPage({ initialTicketId = null }) {
           </div>
         )}
       </div>
+
+      <SandboxBanner service="support" />
 
       {error && (
         <div className="card" style={{ padding: '10px 16px', color: 'var(--danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>

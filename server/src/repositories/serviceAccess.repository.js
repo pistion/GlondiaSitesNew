@@ -41,6 +41,16 @@ export async function listByCustomerScope({ userId, organizationIds = [] } = {})
   return [...new Map(rows.map((row) => [row.id, row])).values()];
 }
 
+/** Access rows for a known set of service ids. */
+export async function listByServiceIds(serviceType, serviceIds = []) {
+  const ids = [...new Set((serviceIds ?? []).filter(Boolean))];
+  if (!ids.length) return [];
+  return prisma.serviceAccess.findMany({
+    where: { serviceType, serviceId: { in: ids } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+  });
+}
+
 /** Admin listing with owner info. */
 export async function listAccess({ where = {}, limit = 30, offset = 0 } = {}) {
   const [items, total] = await Promise.all([
@@ -65,6 +75,26 @@ export async function findById(id, { includeUser = false } = {}) {
 
 export async function updateById(id, data, tx = prisma) {
   return tx.serviceAccess.update({ where: { id }, data });
+}
+
+export async function updateManyByUser(userId, data, where = {}) {
+  return prisma.serviceAccess.updateMany({
+    where: { userId, ...where },
+    data,
+  });
+}
+
+/** Update access rows owned directly by a user or through their organization scope. */
+export async function updateManyByCustomerScope({ userId, organizationIds = [] } = {}, data, where = {}) {
+  const owners = [];
+  if (userId) owners.push({ userId });
+  const orgs = [...new Set((organizationIds ?? []).filter(Boolean))];
+  if (orgs.length) owners.push({ organizationId: { in: orgs } });
+  if (!owners.length) return { count: 0 };
+  return prisma.serviceAccess.updateMany({
+    where: { AND: [{ OR: owners }, where] },
+    data,
+  });
 }
 
 /** Create-or-update the access row for a service. */

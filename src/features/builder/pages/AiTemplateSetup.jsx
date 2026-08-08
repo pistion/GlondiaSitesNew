@@ -457,7 +457,7 @@ export function BuilderAiIntake({ templateId, templateType, navigate }) {
         <div style={{ maxWidth: 900, marginBottom: 16 }}>
           {aiConfigured === false ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'var(--bg-warn, #fff3cd)', border: '1px solid var(--border-warn, #ffc107)', borderRadius: 8, fontSize: 13, color: 'var(--text-warn, #664d03)' }}>
-              <ICN.AlertTriangle size={15} />
+              <ICN.AlertCircle size={15} />
               <span>
                 <strong>AI not configured.</strong> OPENAI_API_KEY is not set on this server.
                 You can still fill in answers manually — but "Generate with RoxanneAI" will not work until the key is added.

@@ -1,7 +1,10 @@
 import renderApiService from './renderApiService.js';
 import deploymentStatusService from './deploymentStatusService.js';
 import { makeId, mutateHostingStore, nowIso, readHostingStore } from './hostingStore.js';
+import { prisma } from './db.js';
 import { archiveGeneratedSiteFolder } from '../glondia-engines/01-HOSTING-DEPLOY-ENGINE/03-GITHUB-SOURCE-MOUNTAIN/generatedSiteRepoCleanup.stage.js';
+import * as hostingRepo from '../repositories/hosting.repository.js';
+import { createAdminNotification, safeNotify } from './notificationService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Status constants — avoids bare literals that trip linter word-blockers
@@ -28,16 +31,11 @@ class HostingService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * List all Glondiasites-managed hosting deployments.
-   * Automatically imports any Render services not yet in the store so
-   * pre-deployed apps appear without needing a manual import call.
-   * Individual per-deployment sync happens in getService() or sync().
+   * List Glondiasites-managed hosting deployments from the local ledger.
+   * Provider inventory is never imported from the customer list path; Render is
+   * only queried after a locally-owned deployment record is selected.
    */
   async listHosting(userId, options = {}) {
-    // Background import — pull any Render services not yet tracked.
-    // Fire-and-forget so the list response is never delayed.
-    this.importFromRender().catch(() => {});
-
     const store = await readHostingStore();
     const isAdmin = options.isAdmin === true;
     return store.deployments
@@ -52,27 +50,10 @@ class HostingService {
       .map((d) => this.toHostingSummary(d));
   }
 
-  /**
-   * Get a single deployment, syncing its state from Render first.
-   */
+  /** Get a single deployment from the persisted provider snapshot. */
   async getService(deploymentId) {
     const deployment = await this.findDeployment(deploymentId);
-    const synced = await this.syncDeploymentFromRender(deployment, { quiet: true });
-
-    let renderService = null;
-    if (hasRealRenderId(synced.renderServiceId) && renderApiService.configured()) {
-      try {
-        renderService = await renderApiService.getService(synced.renderServiceId);
-      } catch (error) {
-        if (isRenderGone(error)) {
-          const marked = await this.markDeletedOnRender(synced, error);
-          return this.toHostingDetail(marked, null);
-        }
-        throw error;
-      }
-    }
-
-    return this.toHostingDetail(synced, renderService);
+    return this.toHostingDetail(deployment, null);
   }
 
   /**
@@ -80,7 +61,11 @@ class HostingService {
    */
   async sync(deploymentId, options = {}) {
     const deployment = await this.findManagedDeployment(deploymentId);
-    return this.syncDeploymentFromRender(deployment, options);
+    const synced = await this.syncDeploymentFromRender(deployment, options);
+    if (isMetricsSyncEligible(synced)) {
+      this.syncMetricsForActiveHosting(synced).catch((err) => console.warn('[hosting:metrics] explicit sync metrics failed:', err.message));
+    }
+    return synced;
   }
 
   /**
@@ -100,6 +85,10 @@ class HostingService {
     if (deployment.status === STATUS_SUSPENDED) return deployment;
 
     const renderResult = await renderApiService.suspendService(deployment.renderServiceId);
+
+    // Mirror provider result to the canonical DB row (best-effort — no-op if the
+    // record hasn't been backfilled yet).
+    await hostingRepo.setStatus(deployment.deploymentId, STATUS_SUSPENDED).catch(() => {});
 
     return mutateHostingStore((store) => {
       const stored = this._find(store, deployment.deploymentId);
@@ -174,21 +163,59 @@ class HostingService {
       }
     }
 
-    // ── 3. Purge record + logs from store entirely ────────────────────────
-    await mutateHostingStore((store) => {
-      if (!Array.isArray(store.deployments)) store.deployments = [];
-      if (!Array.isArray(store.sessions)) store.sessions = [];
-      if (!store.logs || typeof store.logs !== 'object' || Array.isArray(store.logs)) store.logs = {};
-      if (!store.disks || typeof store.disks !== 'object' || Array.isArray(store.disks)) store.disks = {};
-      store.deployments = (store.deployments || []).filter(
-        (d) => d.deploymentId !== deployment.deploymentId && d.id !== deployment.deploymentId,
-      );
-      store.sessions = (store.sessions || []).filter(
-        (s) => s.deploymentId !== deployment.deploymentId,
-      );
-      delete store.logs[deployment.deploymentId];
-      delete store.disks[deployment.deploymentId];
-    });
+    // ── 3. Canonical DB record — the source of truth for ownership history.
+    //       Confirmed provider removal (deleted, already-gone, or never
+    //       provisioned) → soft-delete + cancel access. A provider delete
+    //       FAILURE keeps the row, marks it destroy_failed, and alerts an admin.
+    //       The DB row is NEVER purged.
+    const providerDeleteConfirmed = result.renderDeleted || !hasRealRenderId(deployment.renderServiceId);
+    const dbRow = await hostingRepo.findById(deployment.deploymentId).catch(() => null);
+    if (dbRow && !dbRow.deletedAt) {
+      if (providerDeleteConfirmed) {
+        await hostingRepo.finalizeDestroyBundle({ serviceId: dbRow.id, reason: 'customer_deleted' })
+          .catch((e) => console.error(`[hosting] DB finalizeDestroy failed for ${dbRow.id}:`, e.message));
+      } else {
+        result.deleted = false;
+        result.cleanupRequired = true;
+        await hostingRepo.markDestroyFailed(dbRow.id).catch(() => {});
+        safeNotify('hosting-destroy-failed', () => createAdminNotification({
+          type: 'error',
+          title: 'Hosting delete failed at provider',
+          message: `Render delete failed for hosting ${dbRow.id} (service ${deployment.renderServiceId}). Local record kept as destroy_failed — manual cleanup required.`,
+          entityType: 'web_hosting_service',
+          entityId: dbRow.id,
+        }));
+      }
+    }
+
+    // ── 4. Store mirror — purge only when the destroy is confirmed. On a failed
+    //       provider delete keep the mirror visible (marked destroy_failed) so it
+    //       doesn't silently disappear ahead of the DB row.
+    if (providerDeleteConfirmed) {
+      await mutateHostingStore((store) => {
+        if (!Array.isArray(store.deployments)) store.deployments = [];
+        if (!Array.isArray(store.sessions)) store.sessions = [];
+        if (!store.logs || typeof store.logs !== 'object' || Array.isArray(store.logs)) store.logs = {};
+        if (!store.disks || typeof store.disks !== 'object' || Array.isArray(store.disks)) store.disks = {};
+        store.deployments = (store.deployments || []).filter(
+          (d) => d.deploymentId !== deployment.deploymentId && d.id !== deployment.deploymentId,
+        );
+        store.sessions = (store.sessions || []).filter(
+          (s) => s.deploymentId !== deployment.deploymentId,
+        );
+        delete store.logs[deployment.deploymentId];
+        delete store.disks[deployment.deploymentId];
+      });
+    } else {
+      await mutateHostingStore((store) => {
+        const stored = this._find(store, deployment.deploymentId);
+        if (stored) {
+          stored.status = 'destroy_failed';
+          stored.currentStep = 'Delete failed at provider';
+          stored.updatedAt = nowIso();
+        }
+      });
+    }
 
     return result;
   }
@@ -360,6 +387,19 @@ class HostingService {
    * Mark a deployment as deleted because Render reported 404/410.
    */
   async markDeletedOnRender(deployment, error) {
+    // Canonical DB row: a provider service gone during SYNC (no confirmed user
+    // or admin delete) is `provider_missing`, never destroyed — history is
+    // preserved and the record stays visible for review. A row already
+    // soft-deleted by a real delete is left untouched.
+    try {
+      const dbRow = await hostingRepo.findById(deployment.deploymentId);
+      if (dbRow && !dbRow.deletedAt && dbRow.status !== 'provider_missing') {
+        await hostingRepo.markProviderMissing(dbRow.id);
+      }
+    } catch (e) {
+      console.error(`[hosting] DB markProviderMissing failed for ${deployment.deploymentId}:`, e.message);
+    }
+
     return mutateHostingStore((store) => {
       const stored = this._find(store, deployment.deploymentId);
       if (!stored) return deployment;
@@ -728,6 +768,8 @@ class HostingService {
     const deployment = await this.findManagedDeployment(deploymentId);
     this.assertRealRenderService(deployment);
     const renderResult = await renderApiService.resumeService(deployment.renderServiceId);
+    // Mirror provider result to the canonical DB row (best-effort).
+    await hostingRepo.setStatus(deployment.deploymentId, STATUS_LIVE).catch(() => {});
     return mutateHostingStore((store) => {
       const stored = this._find(store, deployment.deploymentId);
       stored.status = STATUS_LIVE;
@@ -845,8 +887,12 @@ class HostingService {
    */
   async listHeaders(deploymentId) {
     const deployment = await this.findManagedDeployment(deploymentId);
-    this.assertRealRenderService(deployment);
-    return renderApiService.listHeaders(deployment.renderServiceId);
+    const tableRows = await listHeaderTableRows(deployment);
+    if (tableRows?.length) return tableRows.map(publicHeader);
+
+    const store = await readHostingStore();
+    normalizeHeaderStore(store);
+    return (store.headers[deployment.deploymentId] || []).map(publicHeader);
   }
 
   /**
@@ -854,8 +900,45 @@ class HostingService {
    */
   async updateHeaders(deploymentId, headers = []) {
     const deployment = await this.findManagedDeployment(deploymentId);
-    this.assertRealRenderService(deployment);
-    return renderApiService.updateHeaders(deployment.renderServiceId, headers);
+    const normalized = validateHeaders(headers);
+    let providerSynced = false;
+    let providerError = null;
+
+    if (hasRealRenderId(deployment.renderServiceId) && renderApiService.configured()) {
+      try {
+        await renderApiService.updateHeaders(deployment.renderServiceId, normalized.map(({ path, name, value }) => ({ path, name, value })));
+        providerSynced = true;
+      } catch (error) {
+        providerError = error?.message || 'Provider header sync failed.';
+      }
+    } else if (!hasRealRenderId(deployment.renderServiceId)) {
+      providerError = 'Provider service is not ready yet.';
+    } else {
+      providerError = 'Provider API is not configured.';
+    }
+
+    const rows = normalized.map((header) => ({
+      id: makeId('hdr'),
+      ...header,
+      hostingServiceId: deployment.deploymentId,
+      renderServiceId: deployment.renderServiceId || null,
+      deploymentId: deployment.deploymentId,
+      organizationId: deployment.organizationId || deployment.clientId || null,
+      createdByUserId: deployment.createdByUserId || deployment.userId || null,
+      providerSynced,
+      providerError,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    }));
+
+    await replaceHeaderTableRows(deployment, rows);
+
+    return mutateHostingStore((store) => {
+      normalizeHeaderStore(store);
+      store.headers[deployment.deploymentId] = rows.map(publicHeader);
+      updateDeploymentHeaders(store, deployment.deploymentId);
+      return store.headers[deployment.deploymentId];
+    });
   }
 
   /**
@@ -877,18 +960,99 @@ class HostingService {
   }
 
   /**
+   * Customer automation webhooks. These are Glondia-side records clients can
+   * attach to a hosting service for website activity/event automation. Event
+   * dispatchers can read this collection later; no provider dependency here.
+   */
+  async listWebhooks(deploymentId) {
+    const deployment = await this.findDeployment(deploymentId);
+    const store = await readHostingStore();
+    normalizeWebhookStore(store);
+    return store.webhooks[deployment.deploymentId] || [];
+  }
+
+  async createWebhook(deploymentId, input = {}) {
+    const deployment = await this.findDeployment(deploymentId);
+    const webhook = validateWebhook(input);
+    return mutateHostingStore((store) => {
+      normalizeWebhookStore(store);
+      const row = {
+        webhookId: makeId('wh'),
+        ...webhook,
+        status: 'active',
+        deliveries: 0,
+        lastDeliveryAt: null,
+        lastDeliveryStatus: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      };
+      store.webhooks[deployment.deploymentId] = [row, ...(store.webhooks[deployment.deploymentId] || [])];
+      updateDeploymentWebhooks(store, deployment.deploymentId);
+      return publicWebhook(row);
+    });
+  }
+
+  async updateWebhook(deploymentId, webhookId, input = {}) {
+    const deployment = await this.findDeployment(deploymentId);
+    const patch = validateWebhook(input, false);
+    return mutateHostingStore((store) => {
+      normalizeWebhookStore(store);
+      const row = (store.webhooks[deployment.deploymentId] || []).find((item) => item.webhookId === webhookId);
+      if (!row) throw notFound('Webhook not found.');
+      Object.assign(row, patch, { updatedAt: nowIso() });
+      updateDeploymentWebhooks(store, deployment.deploymentId);
+      return publicWebhook(row);
+    });
+  }
+
+  async deleteWebhook(deploymentId, webhookId) {
+    const deployment = await this.findDeployment(deploymentId);
+    return mutateHostingStore((store) => {
+      normalizeWebhookStore(store);
+      store.webhooks[deployment.deploymentId] = (store.webhooks[deployment.deploymentId] || []).filter((item) => item.webhookId !== webhookId);
+      updateDeploymentWebhooks(store, deployment.deploymentId);
+      return { deleted: true, webhookId };
+    });
+  }
+
+  /**
    * Get service metrics.
    */
-  async getMetrics(deploymentId, metricType) {
+  async getMetrics(deploymentId, metricType, options = {}) {
     const deployment = await this.findManagedDeployment(deploymentId);
     this.assertRealRenderService(deployment);
+    const range = normalizeMetricsRange(options.range);
+    if (isMetricsSyncEligible(deployment)) {
+      await this.syncMetricsForActiveHosting(deployment, metricType, range).catch((err) => console.warn('[hosting:metrics] provider sync failed:', err.message));
+    }
+    return readStoredHostingMetrics(deployment, metricType, range);
+  }
+
+  async syncMetricsForActiveHosting(deployment, metricType = 'bandwidth', range = normalizeMetricsRange('12h')) {
+    if (!isMetricsSyncEligible(deployment)) return null;
+    const normalizedRange = typeof range === 'string' ? normalizeMetricsRange(range) : range;
+    const shouldSync = await shouldSyncHostingMetrics(deployment, metricType, normalizedRange);
+    if (!shouldSync) return null;
     const endTime = new Date().toISOString();
-    const startTime = new Date(Date.now() - 3600 * 1000).toISOString();
-    return renderApiService.getMetrics(metricType, {
+    const startTime = new Date(Date.now() - normalizedRange.hours * 3600 * 1000).toISOString();
+    const providerPayload = await renderApiService.getMetrics(metricType, {
       resource: deployment.renderServiceId,
       startTime,
       endTime,
     });
+    const response = normalizeHostingMetricsResponse(providerPayload, {
+      deploymentId: deployment.deploymentId,
+      renderServiceId: deployment.renderServiceId,
+      hostingServiceId: deployment.deploymentId,
+      organizationId: deployment.organizationId || deployment.userId || null,
+      createdByUserId: deployment.createdByUserId || deployment.userId || null,
+      metricType,
+      range: normalizedRange,
+      startTime,
+      endTime,
+    });
+    await persistHostingMetricsResponse(response);
+    return response;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -938,6 +1102,7 @@ class HostingService {
       environmentVariablesMetadata: deployment.environmentVariablesMetadata,
       diskMetadata: deployment.diskMetadata,
       domainMetadata: deployment.domainMetadata,
+      webhookMetadata: deployment.webhookMetadata,
       generatedSite: deployment.generatedSite,
       render: deployment.render,
     };
@@ -1032,9 +1197,416 @@ function appendHostingLog(store, deploymentId, message, level = 'info') {
   store.logs[deploymentId] = [entry, ...(store.logs[deploymentId] || [])];
 }
 
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+function normalizeHeaderStore(store) {
+  if (!store.headers || typeof store.headers !== 'object' || Array.isArray(store.headers)) store.headers = {};
+  return store;
+}
+
+function validateHeaders(headers = []) {
+  const rows = Array.isArray(headers) ? headers : [];
+  const seen = new Set();
+  return rows
+    .map((header) => ({
+      path: normalizeHeaderPath(header.path),
+      name: String(header.name || header.key || '').trim(),
+      value: String(header.value ?? '').trim(),
+    }))
+    .filter((header) => header.name || header.value)
+    .map((header) => {
+      if (!header.name) throw validationError('Header name is required.');
+      if (!HEADER_NAME_RE.test(header.name)) throw validationError(`Header "${header.name}" has invalid characters.`);
+      if (!header.value) throw validationError(`Value is required for ${header.name}.`);
+      if (header.name.length > 120) throw validationError('Header names must be 120 characters or fewer.');
+      if (header.value.length > 2000) throw validationError('Header values must be 2000 characters or fewer.');
+      const dedupeKey = `${header.path.toLowerCase()}::${header.name.toLowerCase()}`;
+      if (seen.has(dedupeKey)) throw validationError(`Duplicate header ${header.name} for ${header.path}.`);
+      seen.add(dedupeKey);
+      return header;
+    });
+}
+
+function normalizeHeaderPath(path) {
+  const raw = String(path || '/*').trim();
+  if (raw === '*') return '/*';
+  if (raw.startsWith('/')) return raw;
+  return `/${raw}`;
+}
+
+async function listHeaderTableRows(deployment) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT "id", "hosting_service_id" AS "hostingServiceId", "render_service_id" AS "renderServiceId",
+              "deployment_id" AS "deploymentId", "organization_id" AS "organizationId",
+              "created_by_user_id" AS "createdByUserId", "path", "name", "value",
+              "provider_synced" AS "providerSynced", "provider_error" AS "providerError",
+              "created_at" AS "createdAt", "updated_at" AS "updatedAt"
+         FROM "hosting_headers"
+        WHERE "hosting_service_id" = ? OR "deployment_id" = ? OR "render_service_id" = ?
+        ORDER BY "path" ASC, "name" ASC`,
+      deployment.deploymentId,
+      deployment.deploymentId,
+      deployment.renderServiceId || '',
+    );
+    return Array.isArray(rows) ? rows : [];
+  } catch (error) {
+    if (isMissingHeadersTable(error)) return null;
+    throw error;
+  }
+}
+
+async function replaceHeaderTableRows(deployment, rows) {
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        `DELETE FROM "hosting_headers"
+          WHERE "hosting_service_id" = ? OR "deployment_id" = ? OR "render_service_id" = ?`,
+        deployment.deploymentId,
+        deployment.deploymentId,
+        deployment.renderServiceId || '',
+      );
+      for (const row of rows) {
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "hosting_headers" (
+             "id", "hosting_service_id", "render_service_id", "deployment_id",
+             "organization_id", "created_by_user_id", "path", "name", "value",
+             "provider_synced", "provider_error", "created_at", "updated_at"
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          row.id,
+          row.hostingServiceId,
+          row.renderServiceId,
+          row.deploymentId,
+          row.organizationId,
+          row.createdByUserId,
+          row.path,
+          row.name,
+          row.value,
+          row.providerSynced ? 1 : 0,
+          row.providerError,
+        );
+      }
+    });
+  } catch (error) {
+    if (isMissingHeadersTable(error)) return;
+    throw error;
+  }
+}
+
+function updateDeploymentHeaders(store, serviceId) {
+  normalizeHeaderStore(store);
+  const deployment = store.deployments.find((item) => item.deploymentId === serviceId);
+  if (!deployment) return;
+  deployment.headerMetadata = (store.headers[serviceId] || []).map(publicHeader);
+  deployment.updatedAt = nowIso();
+}
+
+function publicHeader(row = {}) {
+  return {
+    id: row.id,
+    path: row.path || '/*',
+    name: row.name || row.key || '',
+    value: row.value || '',
+    providerSynced: Boolean(row.providerSynced),
+    providerError: row.providerError || null,
+    updatedAt: row.updatedAt || null,
+  };
+}
+
+function isMissingHeadersTable(error) {
+  return /hosting_headers|no such table|does not exist/i.test(error?.message || '');
+}
+
+const WEBHOOK_EVENTS = new Set([
+  'site.activity',
+  'site.form_submitted',
+  'site.error',
+  'deploy.started',
+  'deploy.succeeded',
+  'deploy.failed',
+  'domain.verified',
+  'billing.payment_due',
+]);
+
+function normalizeWebhookStore(store) {
+  if (!store.webhooks || typeof store.webhooks !== 'object' || Array.isArray(store.webhooks)) store.webhooks = {};
+  return store;
+}
+
+function validateWebhook(input = {}, requireAll = true) {
+  const name = String(input.name || input.label || '').trim();
+  const url = String(input.url || input.endpointUrl || '').trim();
+  const events = Array.isArray(input.events) ? input.events : String(input.event || input.events || 'site.activity').split(',');
+  const cleanedEvents = [...new Set(events.map((event) => String(event || '').trim()).filter(Boolean))]
+    .filter((event) => WEBHOOK_EVENTS.has(event));
+  const emailTo = String(input.emailTo || '').trim();
+  const action = String(input.action || 'webhook').trim();
+  if (requireAll && !name) throw validationError('Webhook name is required.');
+  if (name && name.length > 80) throw validationError('Webhook name must be 80 characters or fewer.');
+  if (requireAll && !url && action === 'webhook') throw validationError('Webhook URL is required.');
+  if (url) {
+    let parsed;
+    try { parsed = new URL(url); } catch { throw validationError('Enter a valid webhook URL.'); }
+    if (!['https:', 'http:'].includes(parsed.protocol)) throw validationError('Webhook URL must start with http:// or https://.');
+  }
+  if (requireAll && cleanedEvents.length === 0) throw validationError('Choose at least one webhook event.');
+  const normalizedAction = ['webhook', 'email', 'webhook_and_email'].includes(action) ? action : 'webhook';
+  if (normalizedAction.includes('email') && !emailTo) throw validationError('Notification email is required for email actions.');
+  if (emailTo && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTo)) throw validationError('Enter a valid notification email.');
+  return {
+    ...(name ? { name } : {}),
+    ...(url ? { url } : {}),
+    ...(cleanedEvents.length ? { events: cleanedEvents } : {}),
+    action: normalizedAction,
+    emailTo: emailTo || null,
+  };
+}
+
+function updateDeploymentWebhooks(store, serviceId) {
+  normalizeWebhookStore(store);
+  const deployment = store.deployments.find((item) => item.deploymentId === serviceId);
+  if (!deployment) return;
+  deployment.webhookMetadata = (store.webhooks[serviceId] || []).map(publicWebhook);
+  deployment.updatedAt = nowIso();
+}
+
+function publicWebhook(row = {}) {
+  const { secret, signingSecret, ...safe } = row;
+  return safe;
+}
+
 function isGeneratedTemplateRoot(value = '') {
   const root = String(process.env.RENDER_GENERATED_TEMPLATE_SITES_ROOT_DIR || process.env.GENERATED_TEMPLATE_SITES_ROOT_DIR || 'generated-template-sites').replace(/^\/+|\/+$/g, '');
   return String(value || '').replace(/\\/g, '/').startsWith(`${root}/`);
+}
+
+function normalizeMetricsRange(value = '12h') {
+  const key = String(value || '12h').toLowerCase();
+  if (key === '24h') return { key, hours: 24, resolution: 'hour' };
+  if (key === '7d') return { key, hours: 24 * 7, resolution: 'day' };
+  return { key: '12h', hours: 12, resolution: 'hour' };
+}
+
+function normalizeHostingMetricsResponse(providerPayload, context = {}) {
+  const rows = Array.isArray(providerPayload)
+    ? providerPayload
+    : Array.isArray(providerPayload?.data)
+      ? providerPayload.data
+      : Array.isArray(providerPayload?.values)
+        ? providerPayload.values
+        : Array.isArray(providerPayload?.points)
+          ? providerPayload.points
+          : Array.isArray(providerPayload?.metrics)
+            ? providerPayload.metrics
+            : [];
+
+  const data = rows
+    .map((item, index) => {
+      const timestamp = item.timestamp || item.time || item.at || item.date || deriveMetricTimestamp(context, index, rows.length);
+      const rawValue = Number(item.value ?? item.bandwidth ?? item.outboundBandwidth ?? item.bytes ?? item.total ?? 0);
+      const usedBytes = item.bytes != null || /byte/i.test(String(item.unit || ''));
+      const value = usedBytes ? rawValue / (1024 * 1024) : rawValue;
+      return {
+        timestamp,
+        label: timestamp ? new Date(timestamp).toISOString() : null,
+        value: Number.isFinite(value) ? value : 0,
+        index,
+      };
+    })
+    .filter((point) => Number.isFinite(point.value));
+
+  return {
+    type: context.metricType || providerPayload?.type || 'bandwidth',
+    unit: context.metricType === 'bandwidth' ? 'MB' : providerPayload?.unit || 'value',
+    source: 'provider',
+    hostingServiceId: context.hostingServiceId,
+    deploymentId: context.deploymentId,
+    renderServiceId: context.renderServiceId,
+    organizationId: context.organizationId || null,
+    createdByUserId: context.createdByUserId || null,
+    range: context.range?.key || '12h',
+    resolution: context.range?.resolution || 'hour',
+    startTime: context.startTime,
+    endTime: context.endTime,
+    data,
+    usageThisMonthMb: Math.round(data.reduce((sum, point) => sum + Number(point.value || 0), 0)),
+  };
+}
+
+async function readStoredHostingMetrics(deployment = {}, metricType = 'bandwidth', range = normalizeMetricsRange('12h')) {
+  const hostingServiceId = deployment.deploymentId;
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT "sample_at", "value", "unit", "resolution", "source"
+     FROM "hosting_metric_samples"
+     WHERE "hosting_service_id" = ? AND "metric_type" = ? AND "range_key" = ?
+     ORDER BY "sample_at" ASC`,
+    hostingServiceId,
+    metricType,
+    range.key,
+  ).catch((err) => {
+    if (isMissingMetricsTable(err)) return [];
+    throw err;
+  });
+  const periodKey = currentPeriodKey();
+  const summaries = await prisma.$queryRawUnsafe(
+    `SELECT "bandwidth_used_mb", "request_count", "event_count", "source", "last_provider_sync_at", "metadata"
+     FROM "hosting_usage_summaries"
+     WHERE "hosting_service_id" = ? AND "period_key" = ?
+     LIMIT 1`,
+    hostingServiceId,
+    periodKey,
+  ).catch((err) => {
+    if (isMissingMetricsTable(err)) return [];
+    throw err;
+  });
+  const summary = Array.isArray(summaries) ? summaries[0] : null;
+  const data = (Array.isArray(rows) ? rows : []).map((row, index) => ({
+    timestamp: row.sample_at,
+    label: row.sample_at,
+    value: Number(row.value || 0),
+    index,
+  }));
+  return {
+    type: metricType,
+    unit: rows?.[0]?.unit || (metricType === 'bandwidth' ? 'MB' : 'value'),
+    source: summary?.source || rows?.[0]?.source || 'database',
+    hostingServiceId,
+    deploymentId: deployment.deploymentId,
+    renderServiceId: deployment.renderServiceId || null,
+    organizationId: deployment.organizationId || deployment.userId || null,
+    createdByUserId: deployment.createdByUserId || deployment.userId || null,
+    range: range.key,
+    resolution: rows?.[0]?.resolution || range.resolution,
+    periodKey,
+    lastProviderSyncAt: summary?.last_provider_sync_at || null,
+    data,
+    usageThisMonthMb: Number(summary?.bandwidth_used_mb ?? data.reduce((sum, point) => sum + Number(point.value || 0), 0)),
+    requestCount: Number(summary?.request_count || 0),
+    eventCount: Number(summary?.event_count || 0),
+    metadata: parseJsonText(summary?.metadata),
+  };
+}
+
+async function shouldSyncHostingMetrics(deployment = {}, metricType = 'bandwidth', range = normalizeMetricsRange('12h')) {
+  if (!renderApiService.configured()) return false;
+  const periodKey = currentPeriodKey();
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT "last_provider_sync_at"
+     FROM "hosting_usage_summaries"
+     WHERE "hosting_service_id" = ? AND "period_key" = ?
+     LIMIT 1`,
+    deployment.deploymentId,
+    periodKey,
+  ).catch((err) => {
+    if (isMissingMetricsTable(err)) return [];
+    throw err;
+  });
+  const last = Array.isArray(rows) ? rows[0]?.last_provider_sync_at : null;
+  if (!last) return true;
+  const ageMs = Date.now() - new Date(last).getTime();
+  return Number.isNaN(ageMs) || ageMs > metricsSyncThrottleMs(range, metricType);
+}
+
+function metricsSyncThrottleMs(range = {}, metricType = 'bandwidth') {
+  if (metricType !== 'bandwidth') return 10 * 60 * 1000;
+  if (range.key === '7d') return 30 * 60 * 1000;
+  return 5 * 60 * 1000;
+}
+
+async function persistHostingMetricsResponse(response = {}) {
+  if (!response.hostingServiceId || !response.deploymentId) return;
+  const now = new Date();
+  const periodKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const points = Array.isArray(response.data) ? response.data : [];
+  for (const point of points) {
+    const sampleAt = normalizeSampleDate(point.timestamp || point.label);
+    if (!sampleAt) continue;
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "hosting_metric_samples" (
+        "id", "hosting_service_id", "render_service_id", "deployment_id", "organization_id", "created_by_user_id",
+        "metric_type", "unit", "range_key", "resolution", "sample_at", "value", "source", "provider_payload", "created_at"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT("hosting_service_id", "metric_type", "range_key", "sample_at") DO UPDATE SET
+        "value" = excluded."value",
+        "unit" = excluded."unit",
+        "resolution" = excluded."resolution",
+        "source" = excluded."source",
+        "provider_payload" = excluded."provider_payload"`,
+      makeId('metric'),
+      response.hostingServiceId,
+      response.renderServiceId || null,
+      response.deploymentId,
+      response.organizationId || null,
+      response.createdByUserId || null,
+      response.type || 'bandwidth',
+      response.unit || 'value',
+      response.range || '12h',
+      response.resolution || 'hour',
+      sampleAt,
+      Number(point.value || 0),
+      response.source || 'provider',
+      JSON.stringify(point),
+    );
+  }
+
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "hosting_usage_summaries" (
+      "id", "hosting_service_id", "render_service_id", "deployment_id", "organization_id", "created_by_user_id",
+      "period_key", "bandwidth_used_mb", "request_count", "event_count", "source", "last_provider_sync_at", "metadata",
+      "created_at", "updated_at"
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT("hosting_service_id", "period_key") DO UPDATE SET
+      "render_service_id" = excluded."render_service_id",
+      "deployment_id" = excluded."deployment_id",
+      "bandwidth_used_mb" = excluded."bandwidth_used_mb",
+      "source" = excluded."source",
+      "last_provider_sync_at" = CURRENT_TIMESTAMP,
+      "metadata" = excluded."metadata",
+      "updated_at" = CURRENT_TIMESTAMP`,
+    makeId('usage'),
+    response.hostingServiceId,
+    response.renderServiceId || null,
+    response.deploymentId,
+    response.organizationId || null,
+    response.createdByUserId || null,
+    periodKey,
+    Number(response.usageThisMonthMb || 0),
+    response.source || 'provider',
+    JSON.stringify({ range: response.range, resolution: response.resolution, sampleCount: points.length }),
+  );
+}
+
+function normalizeSampleDate(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function deriveMetricTimestamp(context = {}, index = 0, count = 1) {
+  const start = new Date(context.startTime || Date.now());
+  const end = new Date(context.endTime || Date.now());
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return new Date().toISOString();
+  if (count <= 1) return end.toISOString();
+  const stepMs = (end.getTime() - start.getTime()) / Math.max(1, count - 1);
+  return new Date(start.getTime() + stepMs * index).toISOString();
+}
+
+function isMetricsSyncEligible(deployment = {}) {
+  return hasRealRenderId(deployment.renderServiceId)
+    && ['live', 'building', 'deployed', 'deployed_unverified'].includes(String(deployment.status || '').toLowerCase());
+}
+
+function currentPeriodKey(date = new Date()) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function isMissingMetricsTable(error) {
+  return /hosting_metric_samples|hosting_usage_summaries|no such table|does not exist/i.test(error?.message || '');
+}
+
+function parseJsonText(value, fallback = {}) {
+  if (!value) return fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
 }
 
 /**
@@ -1043,6 +1615,12 @@ function isGeneratedTemplateRoot(value = '') {
 function notFound(message) {
   const error = new Error(message);
   error.status = 404;
+  return error;
+}
+
+function validationError(message) {
+  const error = new Error(message);
+  error.status = 400;
   return error;
 }
 

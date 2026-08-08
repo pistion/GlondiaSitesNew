@@ -25,6 +25,7 @@ import * as vultr from './vultrApiService.js';
 import { calcPricing } from './vpsPricingService.js';
 import { captureOrder as paypalCapture, updateOrderStatus } from './paypalBillingService.js';
 import { createAdminNotification, safeNotify } from './notificationService.js';
+import { listCachedOperatingSystems, listCachedPlans } from './vpsCatalogService.js';
 import { syncVpsInstance, syncOrganizationVps } from './vpsSyncService.js';
 import { toCustomerVpsDto, toCredentialsDto, isDummyRecord } from './vpsDto.js';
 import * as vpsRepo from '../repositories/vps.repository.js';
@@ -32,6 +33,7 @@ import * as actionRepo from '../repositories/vpsAction.repository.js';
 import {
   recordResource,
   listOwnedResources,
+  listOwnedServiceResources,
   findByProviderResourceId,
   requireOwnedResource,
   markResourceDeleted,
@@ -53,7 +55,7 @@ function actorUserId(actor) {
 
 async function resolveOsName(osId) {
   try {
-    const osList = await vultr.listOs();
+    const osList = await listCachedOperatingSystems();
     return osList.find((o) => o.id === osId)?.name ?? null;
   } catch { return null; }
 }
@@ -144,14 +146,11 @@ export function getSettings() {
 export async function listServices(organizationId) {
   const services = await vpsRepo.listByOrganization(organizationId);
   // Controlled, throttled refresh — reads still succeed on provider outage.
-  const changed = await syncOrganizationVps(organizationId, services);
-  const rows = changed ? await vpsRepo.listByOrganization(organizationId) : services;
-  return rows.map(toCustomerVpsDto);
+  return services.map(toCustomerVpsDto);
 }
 
 export async function getService(id, organizationId) {
-  let record = await vpsRepo.requireOwnedById(id, organizationId);
-  record = await syncVpsInstance(record);
+  const record = await vpsRepo.requireOwnedById(id, organizationId);
   return toCustomerVpsDto(record);
 }
 
@@ -170,6 +169,52 @@ export async function getServiceCredentials(id, actor) {
   return toCredentialsDto(record);
 }
 
+export async function updateServiceSettings(id, actor, body = {}) {
+  const record = await vpsRepo.requireOwnedById(id, actor.organizationId);
+  const label = body.label != null ? String(body.label).trim().slice(0, 64) : undefined;
+  const hostname = body.hostname != null ? String(body.hostname).trim().slice(0, 255) : undefined;
+  const tags = Array.isArray(body.tags)
+    ? body.tags.map((tag) => String(tag).trim()).filter(Boolean).slice(0, 16)
+    : undefined;
+
+  if (label === '' || hostname === '') {
+    throw Object.assign(new Error('Label and hostname cannot be empty.'), { status: 400 });
+  }
+
+  const providerPatch = {};
+  if (label !== undefined) providerPatch.label = label;
+  if (hostname !== undefined) providerPatch.hostname = hostname;
+  if (tags !== undefined) providerPatch.tags = tags;
+
+  if (Object.keys(providerPatch).length > 0 && !isDummyRecord(record)) {
+    await vultr.updateInstanceSettings(record.providerInstanceId, providerPatch);
+  }
+
+  let next = record;
+  if (label !== undefined || hostname !== undefined) {
+    next = await vpsRepo.updateProviderState(record.id, {
+      ...(label !== undefined ? { label } : {}),
+      ...(hostname !== undefined ? { hostname } : {}),
+    });
+  }
+  if (tags !== undefined) {
+    next = await vpsRepo.mergeMetadata(record.id, { tags });
+  }
+
+  await actionRepo.recordCompletedAction({
+    vpsServiceId: record.id,
+    organizationId: actor.organizationId,
+    actorUserId: actorUserId(actor),
+    action: 'settings_update',
+    request: {
+      ...(label !== undefined ? { label } : {}),
+      ...(hostname !== undefined ? { hostname } : {}),
+      ...(tags !== undefined ? { tags } : {}),
+    },
+  });
+  return toCustomerVpsDto(next);
+}
+
 // ─── Creation engine ──────────────────────────────────────────────────────────
 
 /**
@@ -179,9 +224,14 @@ export async function getServiceCredentials(id, actor) {
 async function provisionInstance(dto, actor, billing) {
   const testMode = vultr.isTestMode() && !vultr.isConfigured();
 
-  const plans = await vultr.listPlans();
+  const plans = await listCachedPlans(undefined, { region: dto.region });
   const plan  = plans.find((p) => p.id === dto.plan);
-  if (!plan) throw Object.assign(new Error(`Plan "${dto.plan}" not found.`), { status: 404 });
+  if (!plan) {
+    throw Object.assign(
+      new Error(`Plan "${dto.plan}" is not available in region "${dto.region}". Choose one of the available plans for this location.`),
+      { status: 400 },
+    );
+  }
 
   const { baseCents, mkupCents, totalCents, markup } = calcPricing(plan.monthly_cost);
   const osName = await resolveOsName(dto.osId);
@@ -189,6 +239,7 @@ async function provisionInstance(dto, actor, billing) {
   // Step 1 — record intent before any provider call (one short transaction).
   const { record, actionRecord } = await vpsRepo.createPendingBundle({
     service: {
+      clientProjectId: dto.clientProjectId || null,
       organizationId: actor.organizationId,
       createdByUserId: actorUserId(actor),
       label: dto.label,
@@ -205,6 +256,7 @@ async function provisionInstance(dto, actor, billing) {
       ...billing.serviceFields,
     },
     access: {
+      clientProjectId: dto.clientProjectId || null,
       userId: actorUserId(actor),
       organizationId: actor.organizationId,
       adminStatus: 'allowed',
@@ -220,8 +272,9 @@ async function provisionInstance(dto, actor, billing) {
 
   // Step 2 — provider calls, outside any transaction.
   let instance;
+  let sshKeyId = null;
   try {
-    const sshKeyId = await registerSshKey(dto.label, dto, actor);
+    sshKeyId = await registerSshKey(dto.label, dto, actor);
     instance = await vultr.createInstance(buildVultrPayload(dto, sshKeyId, actor.organizationId));
   } catch (err) {
     // Step 4 — provider refused: keep the record visible as failed.
@@ -246,6 +299,12 @@ async function provisionInstance(dto, actor, billing) {
         ...billing.metadata(instance, testMode),
         connectionUsername: 'root',
         connectionPassword: instance.default_password || (testMode ? makeRootPassword() : null),
+        backupsEnabled: Boolean(dto.backups),
+        ddosProtectionEnabled: Boolean(dto.ddosProtection),
+        ipv6Enabled: Boolean(dto.enableIpv6),
+        userDataPresent: Boolean(dto.userData),
+        tags: [`org:${actor.organizationId}`],
+        sshKeyId,
       },
       actionResponse: { providerInstanceId: instance.id },
     });
@@ -476,13 +535,30 @@ export async function destroyService(id, actor) {
 // ─── SSH keys ─────────────────────────────────────────────────────────────────
 
 export async function listSshKeys(organizationId) {
-  // The Vultr account is shared: return only keys mapped to this organization,
-  // never the raw account-wide listing.
   const owned = await listOwnedResources(organizationId, 'ssh_key');
-  if (owned.length === 0) return [];
-  const ownedIds = new Set(owned.map((r) => r.providerResourceId));
-  const data = await vultr.listSshKeys();
-  return data.filter((k) => ownedIds.has(k.id));
+  return owned.map((resource) => ({
+    id: resource.providerResourceId,
+    name: resource.name || resource.providerResourceId,
+    status: resource.status,
+    date_created: resource.createdAt,
+  }));
+}
+
+export async function createSshKey(actor, body = {}) {
+  const name = String(body.name || '').trim();
+  const publicKey = String(body.publicKey || body.ssh_key || '').trim();
+  if (!name || !publicKey) {
+    throw Object.assign(new Error('name and publicKey are required.'), { status: 400 });
+  }
+  const key = await vultr.createSshKey(name, publicKey);
+  await recordResource({
+    organizationId: actor.organizationId,
+    userId: actorUserId(actor),
+    resourceType: 'ssh_key',
+    providerResourceId: key.id,
+    name,
+  });
+  return key;
 }
 
 export async function deleteSshKey(keyId, actor) {
@@ -499,18 +575,153 @@ export async function deleteSshKey(keyId, actor) {
 
 export async function getBandwidth(id, organizationId) {
   const record = await vpsRepo.requireOwnedById(id, organizationId);
-  return vultr.getInstanceBandwidth(record.providerInstanceId);
+  let metadata = {};
+  try { metadata = JSON.parse(record.metadata || '{}'); } catch { /* use empty snapshot */ }
+  const usedGb = Number(metadata.bandwidthUsedGb || 0);
+  const includedGb = Number(metadata.bandwidthIncludedGb || 0);
+  return {
+    usedGb,
+    includedGb,
+    percentUsed: includedGb > 0 ? Math.min(100, (usedGb / includedGb) * 100) : 0,
+    updatedAt: metadata.bandwidthUpdatedAt || null,
+  };
+}
+
+function bytesToGb(bytes) {
+  return Math.round((Number(bytes || 0) / 1024 / 1024 / 1024) * 100) / 100;
+}
+
+function summarizeBandwidth(raw) {
+  let bytes = 0;
+  for (const value of Object.values(raw || {})) {
+    if (!value || typeof value !== 'object') continue;
+    bytes += Number(value.incoming_bytes || value.in_bytes || value.rx_bytes || 0);
+    bytes += Number(value.outgoing_bytes || value.out_bytes || value.tx_bytes || 0);
+  }
+  return { raw, usedGb: bytesToGb(bytes), totalBytes: bytes };
+}
+
+const SUMMARY_REFRESH_MIN_INTERVAL_MS = Number(process.env.VPS_SUMMARY_REFRESH_MIN_INTERVAL_MS ?? 30000);
+const lastSummaryRefreshAt = new Map();
+
+function shouldRefreshSummary(id) {
+  const last = lastSummaryRefreshAt.get(id) ?? 0;
+  if (SUMMARY_REFRESH_MIN_INTERVAL_MS > 0 && Date.now() - last < SUMMARY_REFRESH_MIN_INTERVAL_MS) return false;
+  lastSummaryRefreshAt.set(id, Date.now());
+  return true;
+}
+
+export async function refreshServiceSummarySnapshot(record) {
+  if (!shouldRefreshSummary(record.id)) return;
+
+  try {
+    record = await syncVpsInstance(record);
+
+    const snapshot = {};
+    const isDummy = isDummyRecord(record);
+    const canCallProvider = vultr.isConfigured() || isDummy;
+
+    if (canCallProvider && record.providerInstanceId && record.providerInstanceId !== 'FAILED' && record.providerInstanceId !== 'pending') {
+      const [bandwidthResult, backupResult] = await Promise.allSettled([
+        vultr.getInstanceBandwidth(record.providerInstanceId),
+        vultr.getBackupSchedule(record.providerInstanceId),
+      ]);
+
+      if (bandwidthResult.status === 'fulfilled') {
+        const bandwidth = summarizeBandwidth(bandwidthResult.value);
+        snapshot.bandwidthUsedGb = bandwidth.usedGb;
+        snapshot.bandwidthTotalBytes = bandwidth.totalBytes;
+        snapshot.bandwidthUpdatedAt = new Date().toISOString();
+      }
+
+      if (backupResult.status === 'fulfilled') {
+        const schedule = backupResult.value || {};
+        snapshot.backupSchedule = schedule;
+        snapshot.backupsEnabled = Boolean(schedule.enabled ?? schedule.type ?? schedule.hour);
+      }
+    }
+
+    if (Object.keys(snapshot).length > 0) {
+      await vpsRepo.mergeMetadata(record.id, {
+        ...snapshot,
+        providerSyncedAt: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.warn(`[vps:summary] Background refresh failed for ${record.id}:`, err.message);
+  }
+}
+
+export function startVpsServiceSyncScheduler() {
+  const intervalMs = Math.max(60_000, Number(process.env.VPS_SERVICE_SYNC_INTERVAL_MS || 5 * 60 * 1000));
+  const run = async () => {
+    if (!vultr.isConfigured()) return;
+    const services = (await vpsRepo.listAllForAdmin()).filter((service) => !service.deletedAt);
+    const byOrganization = new Map();
+    for (const service of services) {
+      const rows = byOrganization.get(service.organizationId) || [];
+      rows.push(service);
+      byOrganization.set(service.organizationId, rows);
+    }
+    for (const [organizationId, rows] of byOrganization) {
+      await syncOrganizationVps(organizationId, rows);
+    }
+    await Promise.allSettled(services.map(refreshServiceSummarySnapshot));
+  };
+  const initial = setTimeout(() => run().catch((error) => console.warn('[vps:sync] Initial backend sync failed:', error.message)), 2_000);
+  initial.unref?.();
+  const timer = setInterval(() => run().catch((error) => console.warn('[vps:sync] Scheduled backend sync failed:', error.message)), intervalMs);
+  timer.unref?.();
+  return {
+    close() {
+      clearTimeout(initial);
+      clearInterval(timer);
+    },
+  };
+}
+
+/**
+ * Customer-safe provider summary used by the VPS detail toolbar and overview.
+ * Provider data is persisted into the service metadata as a cached snapshot so
+ * the UI still has sensible values when a later provider refresh fails.
+ */
+export async function getServiceSummary(id, actor) {
+  const record = await vpsRepo.requireOwnedById(id, actor.organizationId);
+
+  return {
+    service: toCustomerVpsDto(record),
+    toolbar: {
+      canOpenConsole: false,
+      consoleMessage: 'Console launch is not wired to the provider yet.',
+      canPowerOn: ['stopped', 'halted'].includes(record.status),
+      canPowerOff: ['active', 'running'].includes(record.status),
+      canReboot: !['pending', 'provisioning', 'destroyed', 'destroy_pending'].includes(record.status),
+      canDestroy: !['destroyed', 'destroy_pending'].includes(record.status),
+    },
+  };
 }
 
 // ─── Snapshots ────────────────────────────────────────────────────────────────
 
 export async function listSnapshots(organizationId) {
-  // Shared provider account: only snapshots mapped to this organization.
   const owned = await listOwnedResources(organizationId, 'snapshot');
-  if (owned.length === 0) return [];
-  const ownedIds = new Set(owned.map((r) => r.providerResourceId));
-  const data = await vultr.listSnapshots();
-  return data.filter((s) => ownedIds.has(s.id));
+  return owned.map((resource) => ({
+    id: resource.providerResourceId,
+    description: resource.name || 'Snapshot',
+    status: resource.status,
+    date_created: resource.createdAt,
+  }));
+}
+
+export async function listServiceSnapshots(id, actor) {
+  const record = await vpsRepo.requireOwnedById(id, actor.organizationId);
+  const owned = await listOwnedServiceResources(actor.organizationId, record.id, 'snapshot');
+  return owned.map((resource) => ({
+    id: resource.providerResourceId,
+    description: resource.name || 'Snapshot',
+    status: resource.status,
+    date_created: resource.createdAt,
+  }));
 }
 
 export async function createSnapshot(id, actor, description) {
@@ -564,12 +775,26 @@ export async function restoreService(id, actor, snapshotId) {
 
 export async function getBackupSchedule(id, organizationId) {
   const record = await vpsRepo.requireOwnedById(id, organizationId);
-  return vultr.getBackupSchedule(record.providerInstanceId);
+  let metadata = {};
+  try { metadata = JSON.parse(record.metadata || '{}'); } catch { /* use empty snapshot */ }
+  return metadata.backupSchedule || { enabled: Boolean(metadata.backupsEnabled) };
 }
 
 export async function setBackupSchedule(id, organizationId, body) {
   const record = await vpsRepo.requireOwnedById(id, organizationId);
-  return vultr.setBackupSchedule(record.providerInstanceId, body || {});
+  const schedule = await vultr.setBackupSchedule(record.providerInstanceId, body || {});
+  await vpsRepo.mergeMetadata(record.id, {
+    backupSchedule: schedule,
+    backupsEnabled: Boolean(schedule?.enabled ?? schedule?.type ?? schedule?.hour),
+  });
+  await actionRepo.recordCompletedAction({
+    vpsServiceId: record.id,
+    organizationId,
+    action: 'backup_schedule_update',
+    request: body || {},
+    response: schedule || {},
+  });
+  return schedule;
 }
 
 // ─── Resize / reinstall ───────────────────────────────────────────────────────
@@ -580,9 +805,14 @@ export async function resizeService(id, actor, plan) {
 
   // Validate the target plan and price the change BEFORE touching the provider
   // so a resized server never keeps its old plan's price.
-  const plans = await vultr.listPlans();
+  const plans = await listCachedPlans(undefined, { region: record.region });
   const targetPlan = plans.find((p) => p.id === plan);
-  if (!targetPlan) throw Object.assign(new Error(`Plan "${plan}" not found.`), { status: 404 });
+  if (!targetPlan) {
+    throw Object.assign(
+      new Error(`Plan "${plan}" is not available in region "${record.region}". Choose an available plan for this server location.`),
+      { status: 400 },
+    );
+  }
   const { baseCents, mkupCents, totalCents, markup } = calcPricing(targetPlan.monthly_cost);
 
   await vultr.resizeInstance(record.providerInstanceId, plan);

@@ -1,23 +1,49 @@
 import React, { useEffect, useState } from 'react';
 import { ICN } from './icons';
 import { Badge, Empty, StatusBadge, Tabs } from './components';
+import SandboxBanner from './features/sandbox/SandboxBanner.jsx';
+import BillingSection from './features/hosting-management/BillingSection.jsx';
 import {
   deployVpsService,
   destroyVpsService,
+  createVpsSnapshot,
+  createVpsSshKey,
+  deleteVpsSnapshot,
+  deleteVpsSshKey,
   getVpsCredentials,
+  getVpsBackupSchedule,
+  getVpsBandwidth,
   getVpsService,
+  getVpsServiceSummary,
   getVpsQuote,
   getVultrSettings,
   haltVpsService,
+  listVpsServiceSnapshots,
   listVpsServices,
+  listVpsSshKeys,
   listVultrOperatingSystems,
   listVultrPlans,
   listVultrRegions,
   rebootVpsService,
+  reinstallVpsService,
+  resizeVpsService,
+  restoreVpsFromSnapshot,
   startVpsService,
+  setVpsBackupSchedule,
+  updateVpsServiceSettings,
 } from './api/vultr.js';
 
 const fmtCents = (cents) => cents != null ? (cents / 100).toFixed(2) : '—';
+const fmtGb = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}GB` : '0.00GB';
+
+function relativeCreatedAt(value) {
+  if (!value) return '';
+  const created = new Date(value).getTime();
+  if (!Number.isFinite(created)) return '';
+  const days = Math.max(0, Math.floor((Date.now() - created) / 86400000));
+  if (days === 0) return 'Created today';
+  return days === 1 ? 'Created 1 day ago' : `Created ${days} days ago`;
+}
 
 // ─── Plan type catalogue ───────────────────────────────────────────────────────
 
@@ -62,6 +88,59 @@ const CONTINENT = {
   in: 'Asia-Pacific', au: 'Asia-Pacific',
   za: 'Africa',
 };
+
+function planAvailableInRegion(plan, region) {
+  if (!plan || plan.deploy_ondemand === false) return false;
+  if (!region) return true;
+  return !Array.isArray(plan.locations) || plan.locations.includes(region);
+}
+
+function planMonthlyCost(plan, region) {
+  return Number(plan?.location_cost?.[region]?.monthly_cost ?? plan?.monthly_cost ?? 0);
+}
+
+function powerScore(plan) {
+  return Number(plan?.vcpu_count || 0) * 1000 + Number(plan?.ram || 0) + Number(plan?.disk || 0) * 10;
+}
+
+function curatePlanRange(plans, region) {
+  const available = (plans || [])
+    .filter((plan) => planAvailableInRegion(plan, region))
+    .map((plan) => ({ ...plan, monthly_cost: planMonthlyCost(plan, region) }))
+    .sort((a, b) => planMonthlyCost(a, region) - planMonthlyCost(b, region));
+
+  if (available.length <= 3) {
+    return available.map((plan, index) => ({
+      ...plan,
+      recommendation: ['starter', 'balanced', 'power'][index] || 'option',
+    }));
+  }
+
+  const starter = available[0];
+  const power = available[available.length - 1];
+  const starterCost = planMonthlyCost(starter, region);
+  const powerCost = planMonthlyCost(power, region);
+  const targetCost = Math.min(Math.max(starterCost * 4, starterCost + 10), powerCost * 0.45);
+  const balanced = available.slice(1, -1).reduce((best, plan) => {
+    const planDistance = Math.abs(planMonthlyCost(plan, region) - targetCost);
+    const bestDistance = Math.abs(planMonthlyCost(best, region) - targetCost);
+    if (planDistance !== bestDistance) return planDistance < bestDistance ? plan : best;
+    return powerScore(plan) > powerScore(best) ? plan : best;
+  }, available[1]);
+
+  return [
+    { ...starter, recommendation: 'starter' },
+    { ...balanced, recommendation: 'balanced' },
+    { ...power, recommendation: 'power' },
+  ];
+}
+
+function planRecommendationLabel(plan) {
+  if (plan?.recommendation === 'starter') return 'Starter';
+  if (plan?.recommendation === 'balanced') return 'Best value';
+  if (plan?.recommendation === 'power') return 'Power';
+  return 'Option';
+}
 
 function regionContinent(r) {
   return CONTINENT[r.country?.toLowerCase()] ?? 'Other';
@@ -130,15 +209,12 @@ function StepBar({ step }) {
 
 function SelectCard({ selected, onClick, children, style }) {
   return (
-    <button type="button" onClick={onClick} style={{
-      textAlign: 'left', cursor: 'pointer', border: 'none', borderRadius: 'var(--r)',
-      padding: '14px 16px',
-      background: selected ? 'var(--accent-soft)' : 'var(--bg-card)',
-      outline: selected ? '2px solid var(--accent)' : '1px solid var(--border)',
-      outlineOffset: selected ? 0 : -1,
-      transition: 'outline .1s, background .1s',
-      ...style,
-    }}>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`vps-select-card${selected ? ' is-selected' : ''}`}
+      style={style}
+    >
       {children}
     </button>
   );
@@ -193,7 +269,7 @@ export function VpsHostingList({ navigate, refreshKey = 0 }) {
           <p className="sub">Provision and manage virtual private servers — choose your region, resources, and OS.</p>
         </div>
         <div className="actions">
-          {tab === 'servers' && (
+          {tab === 'servers' && !loading && servers.length > 0 && (
             <button className="btn btn-primary" onClick={() => navigate({ view: 'vps-create' })}>
               <ICN.Plus size={14} /> New server
             </button>
@@ -201,12 +277,15 @@ export function VpsHostingList({ navigate, refreshKey = 0 }) {
         </div>
       </div>
 
+      <SandboxBanner service="vps" />
+
       <Tabs
         value={tab}
         onChange={setTab}
         options={[
           { value: 'servers',  label: 'My servers' },
           { value: 'plans',    label: 'Plans & pricing' },
+          { value: 'billing',  label: 'Billing' },
           { value: 'settings', label: 'Settings' },
         ]}
       />
@@ -292,6 +371,8 @@ export function VpsHostingList({ navigate, refreshKey = 0 }) {
         </>
       ) : tab === 'plans' ? (
         <VpsPlans navigate={navigate} />
+      ) : tab === 'billing' ? (
+        <BillingSection scope="vps" app={{ billingPlanName: 'Professional' }} />
       ) : (
         <VpsSettings />
       )}
@@ -301,7 +382,7 @@ export function VpsHostingList({ navigate, refreshKey = 0 }) {
 
 // ─── VPS Create Wizard ────────────────────────────────────────────────────────
 
-export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = '' }) {
+export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = '', initialProjectId = '' }) {
   const [step, setStep]           = useState(initialPlanType ? 1 : 0);
   const [regions, setRegions]     = useState([]);
   const [plans, setPlans]         = useState([]);
@@ -366,6 +447,7 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
     setStep(6);
     try {
       const vps = await deployVpsService({
+        clientProjectId: initialProjectId || undefined,
         region: form.region, plan: form.plan, osId: form.osId,
         label: form.label, hostname: form.hostname || form.label,
         sshKeyId:    form.sshMode === 'existing' ? form.sshKeyId    : undefined,
@@ -396,14 +478,22 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
     return true;
   };
 
-  const typePlans  = form.planType ? plans.filter((p) => p.type === form.planType) : plans;
-  const regionPlans = form.region
-    ? typePlans.filter((p) => !p.locations?.length || p.locations.includes(form.region))
-    : typePlans;
+  const typePlans = form.planType ? plans.filter((p) => p.type === form.planType) : plans;
+  const availableRegionPlans = form.region
+    ? typePlans.filter((p) => planAvailableInRegion(p, form.region))
+    : typePlans.filter((p) => p.deploy_ondemand !== false);
+  const regionPlans = curatePlanRange(availableRegionPlans, form.region);
 
   const selectedRegion = regions.find((r) => r.id === form.region);
-  const selectedPlan   = plans.find((p) => p.id === form.plan);
+  const selectedPlan   = regionPlans.find((p) => p.id === form.plan) || plans.find((p) => p.id === form.plan);
   const selectedOs     = osList.find((o) => o.id === form.osId);
+
+  useEffect(() => {
+    if (!plansReady || !form.plan) return;
+    if (!availableRegionPlans.some((p) => p.id === form.plan)) {
+      setForm((current) => ({ ...current, plan: '' }));
+    }
+  }, [plansReady, form.region, form.planType, form.plan, plans]);
 
   return (
     <>
@@ -417,6 +507,8 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
           <button className="btn btn-ghost" onClick={() => navigate({ view: 'vps-hosting' })}>Cancel</button>
         </div>
       </div>
+
+      <SandboxBanner service="vps" />
 
       <StepBar step={step} />
 
@@ -456,8 +548,8 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                             <span style={{ fontWeight: 700, fontSize: 14 }}>{pt.name}</span>
                             {pt.badge && (
-                              <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 99,
-                                background: 'var(--accent)', color: '#fff' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: 0, borderRadius: 0,
+                                background: 'transparent', color: 'var(--accent)' }}>
                                 {pt.badge}
                               </span>
                             )}
@@ -522,7 +614,7 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
             <div>
               <h3 style={{ marginTop: 0, marginBottom: 4 }}>Choose your resources</h3>
               <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
-                Prices shown include platform fee. You can upgrade anytime.
+                We show a focused range for this location: a low-cost starter, a balanced best value, and a high-power option.
               </p>
               {!plansReady && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -557,12 +649,7 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
                       return (
                         <tr key={p.id}
                           onClick={() => set('plan')(p.id)}
-                          style={{
-                            cursor: 'pointer',
-                            background: sel ? 'var(--accent-soft)' : 'transparent',
-                            outline: sel ? '2px solid var(--accent)' : 'none',
-                            borderBottom: '1px solid var(--border)',
-                          }}>
+                          className={`vps-plan-row${sel ? ' is-selected' : ''}`}>
                           <td style={{ padding: '12px 12px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                               <span style={{
@@ -571,6 +658,7 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
                                 background: sel ? 'var(--accent)' : 'transparent', flexShrink: 0,
                               }} />
                               <span className="mono" style={{ fontSize: 12, color: 'var(--text-faint)' }}>{p.id}</span>
+                              <Badge>{planRecommendationLabel(p)}</Badge>
                             </div>
                           </td>
                           <td style={{ textAlign: 'center', padding: '12px 8px', fontWeight: 600 }}>{p.vcpu_count}</td>
@@ -892,10 +980,12 @@ export function VpsCreateWizard({ navigate, initialPlan = '', initialPlanType = 
 
 export function VpsDetail({ id, navigate, onDestroyed }) {
   const [server, setServer]   = useState(null);
+  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy]       = useState('');
   const [error, setError]     = useState('');
   const [confirm, setConfirm] = useState('');
+  const [detailTab, setDetailTab] = useState('Overview');
   const [showPassword, setShowPassword] = useState(false);
   // Credentials come from the protected reveal endpoint, fetched on demand —
   // they are no longer included in the service payload.
@@ -915,8 +1005,17 @@ export function VpsDetail({ id, navigate, onDestroyed }) {
 
   const load = (showSpinner = true) => {
     if (showSpinner) setLoading(true);
-    getVpsService(id)
-      .then((s) => { setServer(s); setLoading(false); })
+    getVpsServiceSummary(id)
+      .then((result) => {
+        setSummary(result);
+        setServer(result?.service || null);
+        setLoading(false);
+      })
+      .catch(() => getVpsService(id).then((s) => {
+        setSummary(null);
+        setServer(s);
+        setLoading(false);
+      }))
       .catch((err) => { setError(err.message); setLoading(false); });
   };
 
@@ -962,9 +1061,15 @@ export function VpsDetail({ id, navigate, onDestroyed }) {
   const sshUser = server?.connectionUsername || 'root';
   const sshPassword = creds?.password || '';
   const monthlyTotal = server ? `$${fmtCents(server.totalPriceCents)}` : '...';
+  const bandwidthUsed = server?.bandwidthUsedGb ?? 0.05;
+  const backupsLabel = server?.backupsEnabled ? 'Enabled' : 'Disabled';
+  const toolbar = summary?.toolbar || {};
   const copyText = async (value) => {
     try { await navigator.clipboard?.writeText(String(value || '')); } catch {}
   };
+  const powerAction = isStopped
+    ? { key: 'start', label: 'Power on', fn: () => startVpsService(id), disabled: loading || !!busy || toolbar.canPowerOn === false }
+    : { key: 'halt', label: 'Power off', fn: () => haltVpsService(id), disabled: loading || !!busy || toolbar.canPowerOff === false };
 
   if (!loading && !server) return (
     <Empty icon="Server" title="Server not found"
@@ -975,40 +1080,79 @@ export function VpsDetail({ id, navigate, onDestroyed }) {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <div className="page-eyebrow">VPS Services</div>
-          <h1 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {loading ? <Skel w="180px" h={28} /> : server.label}
+      <div className="vps-detail-head">
+        <button className="vps-detail-back" onClick={() => navigate({ view: 'vps-hosting' })} title="All servers">
+          <ICN.ArrowLeft size={22} />
+        </button>
+        <span className="vps-os-mark" title="Server">
+          <ICN.Server size={32} />
+        </span>
+        <div className="vps-detail-title">
+          <h1>
+            {loading ? <Skel w="180px" h={40} /> : server.label}
             {!loading && <StatusBadge value={server.status} />}
-            {isProvisioning && !loading && (
-              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
-                Auto-refreshing…
-              </span>
-            )}
           </h1>
-          <p className="sub">
-            {loading
-              ? <Skel w="260px" h={13} />
-              : `${server.hostname} · ${server.region} · ${server.plan}`}
-          </p>
+          <div className="vps-detail-meta">
+            {loading ? <Skel w="260px" h={13} /> : (
+              <>
+                <span>{server.mainIp || server.hostname || 'IP pending'}</span>
+                <span>{server.region}</span>
+                <span>{relativeCreatedAt(server.createdAt)}</span>
+                {server.testMode && <span className="vps-test-pill">Test mode</span>}
+              </>
+            )}
+          </div>
+          {isProvisioning && !loading && <div className="vps-detail-refreshing">Auto-refreshing...</div>}
         </div>
-        <div className="actions">
-          <button className="btn btn-ghost" onClick={() => navigate({ view: 'vps-hosting' })}>← All servers</button>
-          <button className="btn btn-outline" onClick={() => load(false)} disabled={loading}>
-            <ICN.RefreshCw size={14} /> Refresh
+        <div className="vps-detail-actions" aria-label="Server actions">
+          <button className="btn btn-icon btn-ghost" type="button" disabled={loading}
+            onClick={() => setDetailTab('SSH')} title={server?.mainIp ? 'SSH access' : 'SSH access pending IP'}>
+            <ICN.Terminal size={18} />
+          </button>
+          <button className="btn btn-icon btn-ghost" disabled={powerAction.disabled}
+            onClick={() => act(powerAction.key, powerAction.fn)} title={powerAction.label}>
+            {busy === powerAction.key ? <ICN.RefreshCw size={18} /> : <ICN.Power size={18} />}
+          </button>
+          <button className="btn btn-icon btn-ghost" disabled={loading || !!busy || toolbar.canReboot === false}
+            onClick={() => act('reboot', () => rebootVpsService(id))} title="Reboot">
+            <ICN.RefreshCw size={18} />
+          </button>
+          <button className="btn btn-icon btn-ghost" type="button" disabled={loading}
+            onClick={() => setDetailTab('Settings')} title="Edit server settings">
+            <ICN.Settings size={18} />
+          </button>
+          <button className="btn btn-icon btn-ghost" type="button" disabled={loading}
+            onClick={() => setDetailTab('Usage Graphs')} title={`Status: ${server?.status || 'loading'}`}>
+            <ICN.AlertCircle size={18} />
+          </button>
+          <button className="btn btn-icon btn-ghost" onClick={() => load(false)} disabled={loading} title="Refresh">
+            <ICN.Refresh size={18} />
+          </button>
+          <button className="btn btn-icon btn-ghost" disabled={loading || !!busy || toolbar.canDestroy === false}
+            onClick={() => setConfirm('destroy')} title="Destroy server" style={{ color: 'var(--danger)' }}>
+            <ICN.Trash2 size={18} />
           </button>
         </div>
+      </div>
+
+      <div className="vps-detail-tabs">
+        {['Overview', 'Usage Graphs', 'Settings', 'Billing', 'Snapshots', 'Backups', 'User-Data', 'SSH', 'Tags', 'DDOS', 'Open Tickets'].map((label) => (
+          <button key={label} className={detailTab === label ? 'is-active' : ''} type="button" onClick={() => setDetailTab(label)}>
+            {label}
+          </button>
+        ))}
       </div>
 
       {error && (
         <div className="card" style={{ padding: '10px 16px', color: 'var(--danger)', fontSize: 13 }}>{error}</div>
       )}
 
+      {detailTab === 'Overview' ? (
+        <>
       <div className="vps-overview-metrics">
         <div className="vps-metric-card">
           <span>Bandwidth Usage</span>
-          <strong>{loading ? <Skel w="84px" h={34} /> : '0.05GB'}</strong>
+          <strong>{loading ? <Skel w="84px" h={34} /> : fmtGb(bandwidthUsed)}</strong>
         </div>
         <div className="vps-metric-card">
           <span>vCPU Usage</span>
@@ -1057,14 +1201,14 @@ export function VpsDetail({ id, navigate, onDestroyed }) {
           <div className="vps-info-row"><span>vCPU/s:</span><strong>{loading ? <Skel w="70px" /> : `${server.vcpuCount || 0} vCPUs`}</strong></div>
           <div className="vps-info-row"><span>RAM:</span><strong>{loading ? <Skel w="90px" /> : server.ramMb ? `${server.ramMb.toLocaleString()} MB` : '...'}</strong></div>
           <div className="vps-info-row"><span>Storage:</span><strong>{loading ? <Skel w="80px" /> : server.diskGb ? `${server.diskGb} GB SSD` : '...'}</strong></div>
-          <div className="vps-info-row"><span>Bandwidth:</span><strong className="mono">0.05 GB</strong></div>
+          <div className="vps-info-row"><span>Bandwidth:</span><strong className="mono">{loading ? <Skel w="64px" /> : `${Number(bandwidthUsed).toFixed(2)} GB`}</strong></div>
         </div>
 
         <div className="vps-info-list">
           <div className="vps-info-row"><span>Label:</span><strong>{loading ? <Skel w="110px" /> : server.label}</strong></div>
           <div className="vps-info-row"><span>OS:</span><strong>{loading ? <Skel w="130px" /> : (server.osName || `ID ${server.osId}`)}</strong></div>
           <div className="vps-info-row"><span>Plan:</span><strong className="mono">{loading ? <Skel w="100px" /> : server.plan}</strong></div>
-          <div className="vps-info-row"><span>Auto Backups:</span><strong>{loading ? <Skel w="70px" /> : 'Disabled'}</strong></div>
+          <div className="vps-info-row"><span>Auto Backups:</span><strong>{loading ? <Skel w="70px" /> : backupsLabel}</strong></div>
         </div>
       </div>
 
@@ -1079,152 +1223,256 @@ export function VpsDetail({ id, navigate, onDestroyed }) {
           </button>
         </div>
       )}
+        </>
+      ) : detailTab === 'Billing' ? (
+        <BillingSection
+          scope="vps-item"
+          app={{
+            billingPlanName: server?.plan || 'VPS plan',
+            serviceName: server?.label || server?.hostname || 'VPS server',
+            billingEmail: server?.billingEmail,
+          }}
+        />
+      ) : (
+        <VpsDetailTabPanel
+          tab={detailTab}
+          server={server}
+          bandwidthUsed={bandwidthUsed}
+          monthlyTotal={monthlyTotal}
+          backupsLabel={backupsLabel}
+          navigate={navigate}
+          onReload={() => load(false)}
+          copyText={copyText}
+          revealPassword={revealPassword}
+          showPassword={showPassword}
+          sshPassword={sshPassword}
+          credsLoading={credsLoading}
+        />
+      )}
 
       {confirm === 'destroy' && (
-        <div className="card" style={{ padding: 16, borderColor: 'var(--danger)', color: 'var(--text)' }}>
-          <strong>Destroy this server?</strong>
-          <p className="muted" style={{ margin: '6px 0 12px' }}>This permanently deletes the server record and cannot be undone.</p>
-          <div className="row" style={{ gap: 8 }}>
-            <button className="btn btn-danger btn-sm" disabled={!!busy} onClick={() => act('destroy', () => destroyVpsService(id))}>
-              {busy === 'destroy' ? 'Destroying...' : 'Yes, destroy'}
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setConfirm('')}>Cancel</button>
+        <div className="vps-confirm-overlay" role="presentation" onClick={() => !busy && setConfirm('')}>
+          <div className="vps-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="vps-destroy-title" onClick={(e) => e.stopPropagation()}>
+            <div className="vps-confirm-icon"><ICN.Trash2 size={20} /></div>
+            <div className="vps-confirm-body">
+              <h2 id="vps-destroy-title">Destroy this server?</h2>
+              <p>This permanently deletes the server record and cannot be undone.</p>
+            </div>
+            <div className="vps-confirm-actions">
+              <button className="btn btn-ghost btn-sm" disabled={!!busy} onClick={() => setConfirm('')}>Cancel</button>
+              <button className="btn btn-danger btn-sm" disabled={!!busy} onClick={() => act('destroy', () => destroyVpsService(id))}>
+                {busy === 'destroy' ? 'Destroying...' : 'Yes, destroy'}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      <div className="grid-side vps-detail-old-grid" style={{ '--side-width': '300px' }}>
-
-        {/* Left: server info + connect */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-          <div className="card">
-            <div className="card-head"><h2>Server details</h2></div>
-            <table className="tbl">
-              <tbody>
-                <tr><td className="label">IP address</td>
-                  <td><span className="mono">{loading ? <Skel w="110px" /> : (server.mainIp || 'Pending…')}</span></td></tr>
-                <tr><td className="label">Region</td><td>{loading ? <Skel w="60px" /> : server.region}</td></tr>
-                <tr><td className="label">Plan</td><td className="mono">{loading ? <Skel w="100px" /> : server.plan}</td></tr>
-                <tr><td className="label">vCPU</td><td>{loading ? <Skel w="50px" /> : (server.vcpuCount ? `${server.vcpuCount} cores` : '—')}</td></tr>
-                <tr><td className="label">RAM</td><td>{loading ? <Skel w="50px" /> : (server.ramMb ? `${(server.ramMb / 1024).toFixed(0)} GB` : '—')}</td></tr>
-                <tr><td className="label">Storage</td><td>{loading ? <Skel w="60px" /> : (server.diskGb ? `${server.diskGb} GB SSD` : '—')}</td></tr>
-                <tr><td className="label">OS</td><td className="mono">{loading ? <Skel w="80px" /> : (server.osName || `ID ${server.osId}`)}</td></tr>
-                <tr><td className="label">Created</td>
-                  <td>{loading ? <Skel w="100px" /> : new Date(server.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          {!loading && server.mainIp && server.mainIp !== 'Pending…' && (
-            <div className="card">
-              <div className="card-head"><h2>Connect via SSH</h2></div>
-              <div style={{ padding: '10px 16px 16px' }}>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-                  Open your terminal and run:
-                </div>
-                <div className="mono" style={{
-                  background: 'var(--bg-deep)', padding: '10px 14px', fontSize: 12,
-                  borderRadius: 'var(--r-sm)', userSelect: 'all', wordBreak: 'break-all',
-                }}>
-                  ssh root@{server.mainIp}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                  First time? Run <code>ssh-keygen</code> to generate a key pair, then add the public key when creating future servers.
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Right: pricing + actions */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-          <div className="card">
-            <div className="card-head"><h2>Billing</h2></div>
-            <div style={{ padding: '12px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-                <span style={{ color: 'var(--text-muted)' }}>Plan</span>
-                <span className="mono">{loading ? <Skel w="60px" /> : server.plan}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700,
-                borderTop: '1px solid var(--border)', paddingTop: 10, fontSize: 15 }}>
-                <span>Total / month</span>
-                <span className="mono" style={{ color: 'var(--accent)' }}>
-                  {loading ? <Skel w="65px" h={18} /> : `$${fmtCents(server.totalPriceCents)}`}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head"><h2>Power controls</h2></div>
-            <div style={{ padding: '12px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <button className="btn btn-outline" disabled={loading || !!busy || isActive}
-                onClick={() => act('start', () => startVpsService(id))}>
-                {busy === 'start' ? 'Starting…' : <><ICN.Play size={13} /> Power on</>}
-              </button>
-              <button className="btn btn-outline" disabled={loading || !!busy || isStopped}
-                onClick={() => act('halt', () => haltVpsService(id))}>
-                {busy === 'halt' ? 'Halting…' : <><ICN.Square size={13} /> Power off</>}
-              </button>
-              <button className="btn btn-outline" disabled={loading || !!busy}
-                onClick={() => act('reboot', () => rebootVpsService(id))}>
-                {busy === 'reboot' ? 'Rebooting…' : <><ICN.RefreshCw size={13} /> Reboot</>}
-              </button>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-
-              {confirm === 'destroy' ? (
-                <div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-                    This permanently deletes the server and all its data. This cannot be undone.
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-danger btn-sm" disabled={!!busy}
-                      onClick={() => act('destroy', () => destroyVpsService(id))}>
-                      {busy === 'destroy' ? 'Destroying…' : 'Yes, destroy'}
-                    </button>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setConfirm('')}>Cancel</button>
-                  </div>
-                </div>
-              ) : (
-                <button className="btn btn-outline" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
-                  disabled={loading || !!busy} onClick={() => setConfirm('destroy')}>
-                  <ICN.Trash2 size={13} /> Destroy server
-                </button>
-              )}
-            </div>
-          </div>
-
-        </div>
-      </div>
     </>
   );
 }
 
 // ─── VPS Settings & integrations ──────────────────────────────────────────────
 
-function VpsSettings() {
-  const [settings, setSettings] = useState(null);
-  const [plans, setPlans]       = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [apiError, setApiError] = useState('');
+function VpsDetailTabPanel({ tab, server, bandwidthUsed, monthlyTotal, backupsLabel, navigate, onReload, copyText, revealPassword, showPassword, sshPassword, credsLoading }) {
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const [bandwidth, setBandwidth] = useState(null);
+  const [snapshots, setSnapshots] = useState([]);
+  const [backup, setBackup] = useState(null);
+  const [keys, setKeys] = useState([]);
+  const [plans, setPlans] = useState([]);
+  const [oses, setOses] = useState([]);
+  const [settingsForm, setSettingsForm] = useState({ label: '', hostname: '', tags: '' });
+  const [snapshotName, setSnapshotName] = useState('');
+  const [keyForm, setKeyForm] = useState({ name: '', publicKey: '' });
+
+  const id = server?.id;
+  const sshUser = server?.connectionUsername || 'root';
+  const sshCommand = server?.mainIp ? `ssh ${sshUser}@${server.mainIp}` : '';
+
+  useEffect(() => {
+    setMsg('');
+    setErr('');
+    setSettingsForm({
+      label: server?.label || '',
+      hostname: server?.hostname || '',
+      tags: (server?.tags || []).join(', '),
+    });
+  }, [tab, server?.id]);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([getVultrSettings(), listVultrPlans()])
-      .then(([s, p]) => {
+    if (!id) return undefined;
+    if (tab === 'Usage Graphs') getVpsBandwidth(id).then((v) => alive && setBandwidth(v)).catch((e) => alive && setErr(e.message));
+    if (tab === 'Snapshots') listVpsServiceSnapshots(id).then((v) => alive && setSnapshots(v || [])).catch((e) => alive && setErr(e.message));
+    if (tab === 'Backups') getVpsBackupSchedule(id).then((v) => alive && setBackup(v || null)).catch((e) => alive && setErr(e.message));
+    if (tab === 'SSH') listVpsSshKeys().then((v) => alive && setKeys(v || [])).catch((e) => alive && setErr(e.message));
+    if (tab === 'Settings') {
+      listVultrPlans(undefined, { region: server?.region }).then((v) => alive && setPlans(v || [])).catch(() => {});
+      listVultrOperatingSystems().then((v) => alive && setOses(v || [])).catch(() => {});
+    }
+    return () => { alive = false; };
+  }, [tab, id, server?.region]);
+
+  const run = async (key, fn, ok = 'Saved') => {
+    setBusy(key); setErr(''); setMsg('');
+    try {
+      await fn();
+      setMsg(ok);
+      onReload?.();
+    } catch (e) {
+      setErr(e.message || 'Action failed.');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const rows = (items) => (
+    <div className="vps-tab-panel-grid">
+      {items.map(([label, value]) => (
+        <div className="vps-tab-panel-row" key={label}>
+          <span>{label}</span>
+          <strong className={String(value).length > 18 ? 'mono' : ''}>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+
+  const head = (title, copy, action = null) => (
+    <div className="vps-tab-panel-head">
+      <div><h2>{title}</h2><p>{copy}</p></div>
+      {action}
+    </div>
+  );
+
+  return (
+    <section className="vps-tab-panel">
+      {err && <div className="vps-tab-alert danger">{err}</div>}
+      {msg && <div className="vps-tab-alert">{msg}</div>}
+
+      {tab === 'Usage Graphs' && (
+        <>
+          {head('Usage Graphs', 'Live provider usage for this server.', <button className="btn btn-outline btn-sm" disabled={busy === 'usage'} onClick={() => run('usage', async () => setBandwidth(await getVpsBandwidth(id)), 'Usage refreshed')}><ICN.Refresh size={14} /> Refresh</button>)}
+          {rows([
+            ['Bandwidth used', fmtGb(bandwidth?.usedGb ?? bandwidthUsed)],
+            ['Included bandwidth', bandwidth?.includedGb ? fmtGb(bandwidth.includedGb) : 'Plan allowance'],
+            ['vCPU usage', 'Provider metric pending'],
+            ['Last sync', server?.providerSyncedAt ? new Date(server.providerSyncedAt).toLocaleString() : 'Pending'],
+          ])}
+          <div className="vps-usage-bars"><span style={{ width: `${Math.min(100, Number(bandwidth?.percentUsed ?? 4))}%` }} /></div>
+        </>
+      )}
+
+      {tab === 'Settings' && (
+        <>
+          {head('Settings', 'Update client-safe instance settings and run provider service scripts.')}
+          <div className="vps-tab-form">
+            <label><span>Label</span><input className="input" value={settingsForm.label} onChange={(e) => setSettingsForm({ ...settingsForm, label: e.target.value })} /></label>
+            <label><span>Hostname</span><input className="input mono" value={settingsForm.hostname} onChange={(e) => setSettingsForm({ ...settingsForm, hostname: e.target.value })} /></label>
+            <label><span>Plan</span><select className="input mono" defaultValue={server?.plan || ''} onChange={(e) => e.target.value && run('resize', () => resizeVpsService(id, e.target.value), 'Resize requested')}><option value={server?.plan || ''}>{server?.plan || 'Current plan'}</option>{plans.filter((p) => p.id !== server?.plan).map((p) => <option key={p.id} value={p.id}>{p.id} · ${p.monthly_cost}/mo</option>)}</select></label>
+            <label><span>Reinstall OS</span><select className="input" defaultValue="" onChange={(e) => e.target.value && run('reinstall', () => reinstallVpsService(id, Number(e.target.value)), 'Reinstall requested')}><option value="">Choose OS...</option>{oses.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
+            <div className="vps-tab-actions">
+              <button className="btn btn-primary btn-sm" disabled={busy === 'settings'} onClick={() => run('settings', () => updateVpsServiceSettings(id, { label: settingsForm.label, hostname: settingsForm.hostname }), 'Settings saved')}><ICN.Check size={14} /> Save</button>
+              <button className="btn btn-outline btn-sm" disabled={busy === 'reboot'} onClick={() => run('reboot', () => rebootVpsService(id), 'Reboot requested')}><ICN.RefreshCw size={14} /> Reboot</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === 'Snapshots' && (
+        <>
+          {head('Snapshots', 'Create restore points and restore or delete snapshots owned by this VPS.')}
+          <div className="vps-tab-inline-form"><input className="input" placeholder="Snapshot description" value={snapshotName} onChange={(e) => setSnapshotName(e.target.value)} /><button className="btn btn-primary btn-sm" disabled={busy === 'snapshot'} onClick={() => run('snapshot', async () => { await createVpsSnapshot(id, snapshotName || `${server?.label || 'vps'} snapshot`); setSnapshotName(''); setSnapshots(await listVpsServiceSnapshots(id)); }, 'Snapshot requested')}><ICN.Camera size={14} /> Create</button></div>
+          <div className="vps-tab-list">{snapshots.length ? snapshots.map((s) => <div className="vps-tab-list-row" key={s.id}><div><strong>{s.description || s.name || s.id}</strong><span>{s.date_created || s.created_at || 'Snapshot'}</span></div><button className="btn btn-outline btn-sm" onClick={() => run(`restore-${s.id}`, () => restoreVpsFromSnapshot(id, s.id), 'Restore requested')}>Restore</button><button className="btn btn-ghost btn-sm" onClick={() => run(`delete-${s.id}`, async () => { await deleteVpsSnapshot(s.id); setSnapshots(await listVpsServiceSnapshots(id)); }, 'Snapshot deleted')}><ICN.Trash2 size={14} /></button></div>) : <Empty icon="Camera" title="No snapshots yet" body="Create a snapshot before major changes." />}</div>
+        </>
+      )}
+
+      {tab === 'Backups' && (
+        <>
+          {head('Backups', 'Manage the provider backup schedule for this VPS.')}
+          <div className="vps-tab-form compact">
+            <label><span>Status</span><select className="input" value={backup?.enabled === false ? 'off' : 'on'} onChange={(e) => setBackup({ ...(backup || {}), enabled: e.target.value === 'on' })}><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
+            <label><span>Type</span><select className="input" value={backup?.type || backup?.frequency || 'daily'} onChange={(e) => setBackup({ ...(backup || {}), type: e.target.value })}><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label>
+            <div className="vps-tab-actions"><button className="btn btn-primary btn-sm" onClick={() => run('backup', () => setVpsBackupSchedule(id, backup || { type: 'daily', enabled: true }), 'Backup schedule saved')}><ICN.Check size={14} /> Save schedule</button></div>
+          </div>
+          {rows([['Auto backups', backupsLabel], ['Schedule', backup?.type || backup?.frequency || 'Not configured'], ['Next run', backup?.nextRunAt || backup?.next_run_at || 'Provider managed']])}
+        </>
+      )}
+
+      {tab === 'User-Data' && (
+        <>
+          {head('User-Data', 'Startup data is tracked without revealing the original cloud-init content.')}
+          {rows([['Cloud-init supplied', server?.userDataPresent ? 'Yes' : 'No'], ['Visibility', 'Hidden after deploy'], ['Reinstall', 'Available in Settings']])}
+        </>
+      )}
+
+      {tab === 'SSH' && (
+        <>
+          {head('SSH', 'Connection details and owned SSH keys for this account.', sshCommand && <button className="btn btn-outline btn-sm" onClick={() => copyText(sshCommand)}><ICN.Copy size={14} /> Copy command</button>)}
+          {rows([['Command', sshCommand || 'IP pending'], ['Username', sshUser], ['Password', credsLoading ? 'Loading...' : showPassword ? (sshPassword || 'Unavailable') : 'Hidden'], ['SSH key attached', server?.sshKeyAttached ? 'Yes' : 'No']])}
+          <div className="vps-tab-actions"><button className="btn btn-outline btn-sm" onClick={revealPassword}><ICN.Eye size={14} /> {showPassword ? 'Hide password' : 'Reveal password'}</button></div>
+          <div className="vps-tab-inline-form"><input className="input" placeholder="Key name" value={keyForm.name} onChange={(e) => setKeyForm({ ...keyForm, name: e.target.value })} /><input className="input mono" placeholder="ssh-ed25519..." value={keyForm.publicKey} onChange={(e) => setKeyForm({ ...keyForm, publicKey: e.target.value })} /><button className="btn btn-primary btn-sm" onClick={() => run('key', async () => { await createVpsSshKey(keyForm); setKeyForm({ name: '', publicKey: '' }); setKeys(await listVpsSshKeys()); }, 'SSH key added')}><ICN.Plus size={14} /> Add key</button></div>
+          <div className="vps-tab-list">{keys.map((k) => <div className="vps-tab-list-row" key={k.id}><div><strong>{k.name || k.id}</strong><span className="mono">{k.ssh_key || k.public_key || k.id}</span></div><button className="btn btn-ghost btn-sm" onClick={() => run(`key-${k.id}`, async () => { await deleteVpsSshKey(k.id); setKeys(await listVpsSshKeys()); }, 'SSH key deleted')}><ICN.Trash2 size={14} /></button></div>)}</div>
+        </>
+      )}
+
+      {tab === 'Tags' && (
+        <>
+          {head('Tags', 'Provider tags attached to this instance.')}
+          <div className="vps-tab-inline-form"><input className="input" value={settingsForm.tags} onChange={(e) => setSettingsForm({ ...settingsForm, tags: e.target.value })} /><button className="btn btn-primary btn-sm" onClick={() => run('tags', () => updateVpsServiceSettings(id, { tags: settingsForm.tags.split(',') }), 'Tags saved')}><ICN.Tag size={14} /> Save tags</button></div>
+          {rows([['Tags', (server?.tags || []).join(', ') || 'None'], ['Ownership', 'Managed by GlondiaSites'], ['Service label', server?.label || 'Loading']])}
+        </>
+      )}
+
+      {tab === 'DDOS' && (
+        <>
+          {head('DDOS', 'DDoS protection is provisioned with the server and handled by support for plan changes.', <button className="btn btn-outline btn-sm" onClick={() => navigate({ view: 'support' })}>Open ticket</button>)}
+          {rows([['Protection', server?.ddosProtection ? 'Enabled' : 'Not enabled'], ['IPv6', server?.ipv6Enabled ? 'Enabled' : 'Disabled'], ['IP address', server?.mainIp || 'Pending']])}
+        </>
+      )}
+
+      {tab === 'Open Tickets' && (
+        <>
+          {head('Open Tickets', 'Open a support ticket with this VPS already in context.', <button className="btn btn-primary btn-sm" onClick={() => navigate({ view: 'support', params: { service: 'vps', id } })}>Open support</button>)}
+          {rows([['Support context', server?.label || 'This server'], ['Priority', 'Normal'], ['Status', 'Ready']])}
+        </>
+      )}
+    </section>
+  );
+}
+
+function VpsSettings() {
+  const [settings, setSettings] = useState(null);
+  const [plans, setPlans]       = useState([]);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [apiError, setApiError] = useState('');
+  const [plansError, setPlansError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    getVultrSettings()
+      .then((s) => {
         if (!alive) return;
         setSettings(s);
-        setPlans(p ?? []);
       })
       .catch((err) => { if (alive) setApiError(err.message); })
-      .finally(() => { if (alive) setLoading(false); });
+      .finally(() => { if (alive) setSettingsLoading(false); });
+
+    listVultrPlans()
+      .then((p) => {
+        if (!alive) return;
+        setPlans(p ?? []);
+      })
+      .catch((err) => { if (alive) setPlansError(err.message); })
+      .finally(() => { if (alive) setPlansLoading(false); });
+
     return () => { alive = false; };
   }, []);
 
-  if (loading) return (
+  if (false && settingsLoading) return (
     <div className="card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
       Loading settings…
     </div>
@@ -1246,6 +1494,12 @@ function VpsSettings() {
       )}
 
       {/* ── Integration status cards ── */}
+      {settingsLoading && !apiError && (
+        <div className="card" style={{ padding: '10px 14px', fontSize: 12, color: 'var(--text-muted)' }}>
+          Loading saved provider settings...
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
 
         <div className="card">
@@ -1441,6 +1695,14 @@ function VpsSettings() {
             </table>
           </div>
         </div>
+      ) : plansLoading ? (
+        <div className="card" style={{ padding: '18px 20px', color: 'var(--text-muted)', fontSize: 13 }}>
+          Loading the saved VPS plan catalog...
+        </div>
+      ) : plansError ? (
+        <div className="card" style={{ padding: '18px 20px', color: 'var(--text-muted)', fontSize: 13 }}>
+          The saved plan catalog is temporarily unavailable. ({plansError})
+        </div>
       ) : !apiError ? (
         <div className="card" style={{ padding: '28px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
           Plan catalog will appear here once your Vultr API key is configured.
@@ -1480,7 +1742,7 @@ function VpsPlans({ navigate }) {
   );
 
   const markup   = settings?.markupPercent ?? 30;
-  const filtered = plans.filter((p) => p.type === typeFilter);
+  const filtered = curatePlanRange(plans.filter((p) => p.type === typeFilter));
   const typeMeta = PLAN_TYPES.find((t) => t.id === typeFilter);
 
   return (
@@ -1505,7 +1767,7 @@ function VpsPlans({ navigate }) {
         {PLAN_TYPES.map((pt) => {
           const Icon  = ICN[pt.icon];
           const sel   = typeFilter === pt.id;
-          const count = plans.filter((p) => p.type === pt.id).length;
+          const count = curatePlanRange(plans.filter((p) => p.type === pt.id)).length;
           return (
             <SelectCard key={pt.id} selected={sel} onClick={() => setTypeFilter(pt.id)}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
@@ -1521,8 +1783,8 @@ function VpsPlans({ navigate }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                     <span style={{ fontWeight: 700, fontSize: 13 }}>{pt.name}</span>
                     {pt.badge && (
-                      <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 99,
-                        background: 'var(--accent)', color: '#fff' }}>{pt.badge}</span>
+                      <span style={{ fontSize: 9, fontWeight: 700, padding: 0, borderRadius: 0,
+                        background: 'transparent', color: 'var(--accent)' }}>{pt.badge}</span>
                     )}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, marginBottom: 4 }}>
@@ -1530,7 +1792,7 @@ function VpsPlans({ navigate }) {
                   </div>
                   {count > 0 && (
                     <div style={{ fontSize: 11, color: sel ? 'var(--accent)' : 'var(--text-faint)', fontWeight: 600 }}>
-                      {count} sizes available
+                      {count} guided choices
                     </div>
                   )}
                 </div>
@@ -1549,7 +1811,7 @@ function VpsPlans({ navigate }) {
           </div>
           {filtered.length > 0 && (
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              {filtered.length} configurations · {markup}% platform fee included
+              {filtered.length} guided choices · {markup}% platform fee included
             </span>
           )}
         </div>
@@ -1557,7 +1819,7 @@ function VpsPlans({ navigate }) {
         {filtered.length === 0 ? (
           <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
             {settings?.vultrConfigured
-              ? 'No configurations for this plan type.'
+              ? 'No guided choices for this plan type.'
               : 'Configure VULTR_API_KEY on your backend to load the live instance catalog.'}
           </div>
         ) : (
@@ -1584,7 +1846,7 @@ function VpsPlans({ navigate }) {
                     <tr key={p.id}>
                       <td>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>
-                          {p.vcpu_count} {p.vcpu_count === 1 ? 'vCPU' : 'vCPUs'} · {p.ram >= 1024 ? p.ram / 1024 + ' GB' : p.ram + ' MB'} RAM
+                          {planRecommendationLabel(p)} · {p.vcpu_count} {p.vcpu_count === 1 ? 'vCPU' : 'vCPUs'} · {p.ram >= 1024 ? p.ram / 1024 + ' GB' : p.ram + ' MB'} RAM
                         </div>
                         <div className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>
                           {p.id}

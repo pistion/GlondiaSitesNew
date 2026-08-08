@@ -49,6 +49,23 @@ export function createLocalDbRuntime({ makeSession, ttlToSeconds }) {
       return project;
     }
 
+    const projectSummaryMatch = cleanPath.match(/^\/projects\/([^/]+)\/summary$/);
+    if (projectSummaryMatch) {
+      const project = db.projects.find((item) => item.id === projectSummaryMatch[1]);
+      if (!project) throw new Error('Project not found.');
+      const services = [
+        ...(db.hostingServices || []).filter((item) => item.projectId === project.id).map((item) => ({ ...item, type: 'hosting' })),
+        ...(db.sites || []).filter((item) => item.clientProjectId === project.id || item.projectId === project.id).map((item) => ({ ...item, type: 'website' })),
+      ];
+      return {
+        project,
+        services,
+        recentDeployments: db.deployments.filter((item) => item.projectId === project.id).slice(0, 10),
+        recentActivity: db.activity.filter((item) => item.entityId === project.id).slice(0, 20),
+        metrics: { visitors30d: 0, bandwidth30d: 0, requests30d: 0 },
+      };
+    }
+
     const deploymentsMatch = cleanPath.match(/^\/projects\/([^/]+)\/deployments$/);
     if (deploymentsMatch) {
       if (method === 'POST') {
@@ -245,6 +262,58 @@ export function createLocalDbRuntime({ makeSession, ttlToSeconds }) {
       return { synced: db.hostingEnv[serviceId].length, requiresRedeploy: db.hostingEnv[serviceId].some((item) => item.requiresRedeploy) };
     }
 
+    const hostingHeadersMatch = cleanPath.match(/^\/hosting\/([^/]+)\/headers$/);
+    if (hostingHeadersMatch) {
+      const serviceId = hostingHeadersMatch[1];
+      ensureHostingCollections(db);
+      if (!findHostingService(db, serviceId)) throw new Error('Hosting service not found.');
+      if (method === 'PUT') {
+        db.hostingHeaders[serviceId] = normalizeHostingHeaders(body);
+        syncHostingMetadata(db, serviceId);
+        writeLocalDb(db);
+        return db.hostingHeaders[serviceId];
+      }
+      return db.hostingHeaders[serviceId] || [];
+    }
+
+    const hostingWebhookMatch = cleanPath.match(/^\/hosting\/([^/]+)\/webhooks$/);
+    if (hostingWebhookMatch) {
+      const serviceId = hostingWebhookMatch[1];
+      ensureHostingCollections(db);
+      db.hostingWebhooks ||= {};
+      if (method === 'POST') {
+        const webhook = makeHostingWebhook(body);
+        db.hostingWebhooks[serviceId] = [webhook, ...(db.hostingWebhooks[serviceId] || [])];
+        syncHostingMetadata(db, serviceId);
+        writeLocalDb(db);
+        return webhook;
+      }
+      return db.hostingWebhooks[serviceId] || [];
+    }
+
+    const hostingWebhookKeyMatch = cleanPath.match(/^\/hosting\/([^/]+)\/webhooks\/([^/]+)$/);
+    if (hostingWebhookKeyMatch) {
+      const serviceId = hostingWebhookKeyMatch[1];
+      const webhookId = decodeURIComponent(hostingWebhookKeyMatch[2]);
+      ensureHostingCollections(db);
+      db.hostingWebhooks ||= {};
+      const rows = db.hostingWebhooks[serviceId] || [];
+      if (method === 'PATCH') {
+        const row = rows.find((item) => item.webhookId === webhookId);
+        if (!row) throw new Error('Webhook not found.');
+        Object.assign(row, normalizeHostingWebhookInput(body, false), { updatedAt: new Date().toISOString() });
+        syncHostingMetadata(db, serviceId);
+        writeLocalDb(db);
+        return row;
+      }
+      if (method === 'DELETE') {
+        db.hostingWebhooks[serviceId] = rows.filter((item) => item.webhookId !== webhookId);
+        syncHostingMetadata(db, serviceId);
+        writeLocalDb(db);
+        return { deleted: true, webhookId };
+      }
+    }
+
     const hostingDiskMatch = cleanPath.match(/^\/hosting\/([^/]+)\/disk$/);
     if (hostingDiskMatch) {
       const serviceId = hostingDiskMatch[1];
@@ -266,11 +335,12 @@ export function createLocalDbRuntime({ makeSession, ttlToSeconds }) {
       const diskId = hostingDiskIdMatch[2];
       const rows = db.hostingDisks[serviceId] || [];
       const disk = rows.find((item) => item.diskId === diskId);
-      if (method === 'PATCH') Object.assign(disk, body, { updatedAt: new Date().toISOString() });
+      if (!disk && method !== 'DELETE') throw new Error('Disk not found.');
+      if (method === 'PATCH') Object.assign(disk, normalizeHostingDiskPatch(body), { updatedAt: new Date().toISOString() });
       if (method === 'DELETE') db.hostingDisks[serviceId] = rows.filter((item) => item.diskId !== diskId);
       syncHostingMetadata(db, serviceId);
       writeLocalDb(db);
-      return { deleted: method === 'DELETE' };
+      return method === 'DELETE' ? { deleted: true, diskId } : disk;
     }
 
     const templatesMatch = cleanPath.match(/^\/templates(?:\/([^/]+))?$/);
@@ -318,7 +388,9 @@ function seedLocalDb() {
     sites: [],
     hostingServices: [],
     hostingEnv: {},
+    hostingHeaders: {},
     hostingDisks: {},
+    hostingWebhooks: {},
   };
 }
 
@@ -327,8 +399,10 @@ function makeProject(body = {}) {
   const serviceMeta = PROJECT_SERVICE_TYPES.find((item) => item.id === serviceType) || PROJECT_SERVICE_TYPES.at(-1);
   const name = body.name || `${serviceMeta.label} project`;
   const createdAt = new Date().toISOString();
+  const id = createId('proj');
+  const clientId = body.clientId || 'local-client';
   return {
-    id: createId('proj'),
+    id,
     projectId: createId('glp'),
     projectCode: `GLP-${Date.now().toString(36).toUpperCase()}`,
     name,
@@ -338,6 +412,12 @@ function makeProject(body = {}) {
     status: body.status || 'draft',
     priority: body.priority || 'normal',
     description: body.description || '',
+    clientId,
+    storageNamespace: body.storageNamespace || `clients/${clientId}/projects/${id}`,
+    autoBillingEnabled: Boolean(body.autoBillingEnabled),
+    billingAmount: Number(body.billingAmount || 0),
+    billingCurrency: body.billingCurrency || 'PGK',
+    billingInterval: body.billingInterval || 'monthly',
     nextView: serviceMeta.nextView,
     createdAt,
     updatedAt: createdAt,
@@ -421,7 +501,9 @@ function syncHostingMetadata(db, serviceId) {
   if (!service) return;
   service.environmentConfiguration ||= {};
   service.environmentConfiguration.envCount = (db.hostingEnv[serviceId] || []).length;
+  service.environmentConfiguration.headerCount = (db.hostingHeaders[serviceId] || []).length;
   service.environmentConfiguration.diskCount = (db.hostingDisks[serviceId] || []).length;
+  service.environmentConfiguration.webhookCount = (db.hostingWebhooks?.[serviceId] || []).length;
   service.updatedAt = new Date().toISOString();
 }
 
@@ -433,7 +515,9 @@ function findHostingService(db, id) {
 function ensureHostingCollections(db) {
   db.hostingServices ||= [];
   db.hostingEnv ||= {};
+  db.hostingHeaders ||= {};
   db.hostingDisks ||= {};
+  db.hostingWebhooks ||= {};
 }
 
 function makeHostingEnvVar(body = {}) {
@@ -450,13 +534,27 @@ function makeHostingEnvVar(body = {}) {
 }
 
 function makeHostingDisk(body = {}) {
+  const requestedSize = Number(body.sizeGB || body.sizeGb || body.size || 10);
+  const sizeGB = [10, 50, 100].includes(requestedSize) ? requestedSize : 10;
   return {
     diskId: createId('disk'),
     name: body.name || 'data',
     mountPath: body.mountPath || '/var/data',
-    sizeGb: Number(body.sizeGb || 1),
+    sizeGB,
+    status: 'attached',
+    providerSyncStatus: 'synced',
+    providerError: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeHostingDiskPatch(body = {}) {
+  const requestedSize = Number(body.sizeGB || body.sizeGb || body.size || 0);
+  return {
+    ...(body.name ? { name: body.name } : {}),
+    ...(body.mountPath ? { mountPath: body.mountPath } : {}),
+    ...([10, 50, 100].includes(requestedSize) ? { sizeGB: requestedSize } : {}),
   };
 }
 
@@ -464,6 +562,52 @@ function publicHostingEnvVar(env) {
   return {
     ...env,
     value: env.isSecret ? '••••••••' : env.value,
+  };
+}
+
+function normalizeHostingHeaders(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({
+      id: row.id || createId('hdr'),
+      path: normalizeHeaderPath(row.path),
+      name: String(row.name || row.key || '').trim(),
+      value: String(row.value ?? '').trim(),
+      providerSynced: false,
+      providerError: 'Local runtime only.',
+      updatedAt: new Date().toISOString(),
+    }))
+    .filter((row) => row.name && row.value);
+}
+
+function normalizeHeaderPath(path) {
+  const raw = String(path || '/*').trim();
+  if (raw === '*') return '/*';
+  return raw.startsWith('/') ? raw : `/${raw}`;
+}
+
+function makeHostingWebhook(body = {}) {
+  return {
+    webhookId: createId('wh'),
+    ...normalizeHostingWebhookInput(body),
+    status: 'active',
+    deliveries: 0,
+    lastDeliveryAt: null,
+    lastDeliveryStatus: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeHostingWebhookInput(body = {}, requireAll = true) {
+  const name = String(body.name || body.label || '').trim();
+  const url = String(body.url || body.endpointUrl || '').trim();
+  const events = Array.isArray(body.events) ? body.events : String(body.event || body.events || 'site.activity').split(',');
+  return {
+    ...(name || !requireAll ? { name } : {}),
+    ...(url || !requireAll ? { url } : {}),
+    action: ['webhook', 'email', 'webhook_and_email'].includes(body.action) ? body.action : 'webhook',
+    emailTo: String(body.emailTo || '').trim() || null,
+    events: events.map((event) => String(event || '').trim()).filter(Boolean),
   };
 }
 

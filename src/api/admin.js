@@ -8,6 +8,7 @@ import { authHeaders } from './auth.js';
 export const getAdminOverview      = ()                       => liveApiRequest('/admin/overview');
 export const listAdminUsers        = ()                       => liveApiRequest('/admin/users');
 export const listAdminDeployments  = ()                       => liveApiRequest('/admin/deployments');
+export const listAdminVpsServices  = ()                       => liveApiRequest('/admin/vps-services');
 export const listAdminOrders       = ()                       => liveApiRequest('/admin/orders');
 export const listAdminReceipts     = ()                       => liveApiRequest('/admin/receipts');
 export const getAdminActivity      = (params = {})            => liveApiRequest(`/admin/activity?${new URLSearchParams(params)}`);

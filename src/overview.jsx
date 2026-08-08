@@ -1,5 +1,6 @@
 // overview.jsx — dashboard landing
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { ICN } from './icons';
 import { GD } from './data';
 import { StatusBadge, Tabs, Stat, Empty } from './components';
@@ -21,6 +22,8 @@ export function Overview({ navigate }) {
   const [projectTypes, setProjectTypes] = React.useState(DEFAULT_PROJECT_TYPES);
   const [creatingType, setCreatingType] = React.useState('');
   const [createError, setCreateError] = React.useState('');
+  const [sort, setSort] = React.useState({ key: 'createdAt', direction: 'desc' });
+  const [showAllProjects, setShowAllProjects] = React.useState(false);
   const totalVisitors = projects.reduce((a, p) => a + (p.visitors30d || 0), 0);
   const auth = getStoredAuth();
   const userName = auth.user?.name || auth.user?.email || null;
@@ -33,24 +36,35 @@ export function Overview({ navigate }) {
     return () => { cancelled = true; };
   }, []);
 
-  async function handleCreateProject(type) {
-    setCreatingType(type.id);
+  async function handleCreateProject(details) {
+    setCreatingType('project');
     setCreateError('');
     try {
       const project = await createProject({
-        serviceType: type.id,
-        name: `${type.label} project`,
+        serviceType: 'other',
+        name: details.name,
+        description: details.description,
+        autoBillingEnabled: details.autoBillingEnabled,
+        billingAmount: details.billingAmount,
+        billingCurrency: details.billingCurrency,
+        billingInterval: details.billingInterval,
         source: 'overview_dropdown',
       });
       setProjectMenuOpen(false);
-      const nextView = routeForProjectType(type.id, project?.nextView || type.nextView);
-      navigate({ view: nextView, params: { projectId: project.id, serviceType: type.id } });
+      navigate({ view: 'project-workspace', params: { projectId: project.id, tab: 'overview' } });
     } catch (error) {
       setCreateError(error.message || 'Could not create project.');
     } finally {
       setCreatingType('');
     }
   }
+
+  const sortedProjects = React.useMemo(() => [...projects].sort((a, b) => {
+    const av = sort.key.endsWith('At') ? new Date(a[sort.key] || 0).getTime() : String(a[sort.key] || '').toLowerCase();
+    const bv = sort.key.endsWith('At') ? new Date(b[sort.key] || 0).getTime() : String(b[sort.key] || '').toLowerCase();
+    return (av < bv ? -1 : av > bv ? 1 : 0) * (sort.direction === 'asc' ? 1 : -1);
+  }), [projects, sort]);
+  const sortBy = (key) => setSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }));
 
   return (
     <>
@@ -90,29 +104,31 @@ export function Overview({ navigate }) {
           <div className="card-head">
             <h2>Projects</h2>
             <div className="row" style={{ gap: 8 }}>
-              <Tabs value="all" onChange={() => {}} options={["All", "Production", "Preview"]} />
-              <button className="btn btn-sm btn-outline" onClick={() => navigate({ view: "hosting-list" })}>View all <ICN.ArrowRight size={12} /></button>
+              <span className="meta">Sortable project sheet</span>
+              <button className="btn btn-sm btn-outline" onClick={() => setShowAllProjects((value) => !value)}>
+                {showAllProjects ? 'Collapse' : 'View all projects'} <ICN.ArrowRight size={12} />
+              </button>
             </div>
           </div>
-          <div className="table-wrap">
+          <div className={`table-wrap project-sheet-scroll${showAllProjects ? ' is-expanded' : ''}`}>
           <table className="tbl">
             <thead>
-              <tr><th>Project</th><th>Live URL</th><th>Last deploy</th><th>Status</th><th></th></tr>
+              <tr><SortTh label="Project" column="name" sort={sort} onSort={sortBy}/><SortTh label="Project ID" column="projectCode" sort={sort} onSort={sortBy}/><th>Services</th><SortTh label="Created" column="createdAt" sort={sort} onSort={sortBy}/><SortTh label="Updated" column="updatedAt" sort={sort} onSort={sortBy}/><th>Billing</th><SortTh label="Status" column="status" sort={sort} onSort={sortBy}/><th></th></tr>
             </thead>
             <tbody>
               {projects.length === 0 ? (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={8}>
                     <Empty icon="Server" title="No projects yet"
                       body="Create your first project or connect the backend to load existing ones."
                       action={<button className="btn btn-sm btn-primary" onClick={() => setProjectMenuOpen(true)}><ICN.Plus size={13} /> New project</button>} />
                   </td>
                 </tr>
-              ) : projects.map(p => (
+              ) : sortedProjects.map(p => (
                 <tr key={p.id}>
                   <td>
                     <a href="#" className="proj-link"
-                       onClick={(e) => { e.preventDefault(); navigate({ view: "hosting-detail", params: { id: p.id } }); }}>
+                       onClick={(e) => { e.preventDefault(); navigate({ view: "project-workspace", params: { projectId: p.id, tab: 'overview' } }); }}>
                       <span className="proj-thumb">{p.framework[0]}</span>
                       <span>
                         <div>{p.name}</div>
@@ -120,11 +136,14 @@ export function Overview({ navigate }) {
                       </span>
                     </a>
                   </td>
-                  <td className="mono">{p.liveUrl || p.customDomain || p.domain || "—"}</td>
-                  <td>{p.lastDeploy}</td>
+                  <td className="mono">{p.projectCode || p.id}</td>
+                  <td>{p.serviceCount || 0}</td>
+                  <td>{formatStamp(p.createdAt)}</td>
+                  <td>{formatStamp(p.updatedAt)}</td>
+                  <td>{p.autoBillingEnabled ? `${p.billingCurrency} ${Number(p.billingAmount || 0).toFixed(2)}` : 'Manual'}</td>
                   <td><StatusBadge value={p.status} /></td>
                   <td style={{ textAlign: "right" }}>
-                    <button className="btn btn-sm btn-ghost"><ICN.ExternalLink size={14} /></button>
+                    <button className="btn btn-sm btn-ghost" aria-label={`Open ${p.name}`} onClick={() => navigate({ view: 'project-workspace', params: { projectId: p.id, tab: 'overview' } })}><ICN.ArrowRight size={14} /></button>
                   </td>
                 </tr>
               ))}
@@ -166,7 +185,7 @@ export function Overview({ navigate }) {
       <div className="grid-3">
         <ProductCta icon="Server" title="Hosting" body="Deploy from ZIP or GitHub and manage live sites." cta="Open hosting" onClick={() => navigate({ view: "hosting-list" })} />
         <ProductCta icon="Layers" title="Site builder" body="Prepare, organize, and publish sites." cta="Browse templates" onClick={() => navigate({ view: "builder-gallery" })} />
-        <ProductCta icon="CreditCard" title="Billing" body="View K50/K200 launch bills and upload bank receipts." cta="Open billing" onClick={() => navigate({ view: "billing" })} />
+        <ProductCta icon="CreditCard" title="Billing" body="View hosting invoices and upload bank receipts." cta="Open billing" onClick={() => navigate({ view: "billing" })} />
       </div>
     </>
   );
@@ -181,7 +200,6 @@ const DEFAULT_PROJECT_TYPES = [
   { id: 'consultation', label: 'Consultation', nextView: 'overview' },
   { id: 'build', label: 'Custom Build', nextView: 'overview' },
   { id: 'support', label: 'Support', nextView: 'overview' },
-  { id: 'other', label: 'Other', nextView: 'overview' },
 ];
 
 function routeForProjectType(type, fallback) {
@@ -209,8 +227,17 @@ function iconForProjectType(type) {
   return <Icon size={14} />;
 }
 
-function ProjectCreateDrawer({ open, projectTypes, creatingType, error, onClose, onCreate }) {
-  return (
+function ProjectCreateDrawer({ open, creatingType, error, onClose, onCreate }) {
+  const emptyDetails = { name: '', description: '', autoBillingEnabled: false, billingAmount: '', billingCurrency: 'PGK', billingInterval: 'monthly' };
+  const [details, setDetails] = React.useState(emptyDetails);
+  React.useEffect(() => { if (!open) setDetails(emptyDetails); }, [open]);
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previous; };
+  }, [open]);
+  return createPortal((
     <div
       aria-hidden={!open}
       style={{
@@ -218,6 +245,10 @@ function ProjectCreateDrawer({ open, projectTypes, creatingType, error, onClose,
         inset: 0,
         zIndex: 80,
         pointerEvents: open ? 'auto' : 'none',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 'clamp(12px, 3vw, 32px)',
       }}
     >
       <div
@@ -234,30 +265,28 @@ function ProjectCreateDrawer({ open, projectTypes, creatingType, error, onClose,
         role="dialog"
         aria-modal="true"
         aria-label="Create project"
-        className="card"
+        className="card project-create-dialog"
         style={{
-          position: 'absolute',
-          top: 0,
-          right: 0,
-          width: 'min(390px, calc(100vw - 24px))',
-          height: '100%',
-          borderRadius: 0,
-          borderTop: 0,
-          borderRight: 0,
-          borderBottom: 0,
+          position: 'relative',
+          zIndex: 1,
+          width: 'min(460px, calc(100vw - 32px))',
+          maxHeight: 'min(680px, calc(100dvh - 24px))',
+          borderRadius: 'var(--r-lg)',
           padding: 0,
           display: 'flex',
           flexDirection: 'column',
-          transform: open ? 'translateX(0)' : 'translateX(104%)',
-          transition: 'transform .26s cubic-bezier(.2,.8,.2,1)',
-          boxShadow: '-24px 0 60px rgba(0,0,0,.22)',
+          overflow: 'hidden',
+          opacity: open ? 1 : 0,
+          transform: open ? 'translateY(0) scale(1)' : 'translateY(12px) scale(.97)',
+          transition: 'opacity .18s ease, transform .22s cubic-bezier(.2,.8,.2,1)',
+          boxShadow: '0 28px 80px rgba(0,0,0,.34)',
         }}
       >
         <div style={{ padding: '22px 22px 16px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
             <div className="page-eyebrow" style={{ marginBottom: 6 }}>New project</div>
-            <h2 style={{ margin: 0, fontSize: 24 }}>Choose service type</h2>
-            <p className="muted" style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.5 }}>Every service starts inside a project record with its own project id.</p>
+            <h2 style={{ margin: 0, fontSize: 24 }}>Project settings</h2>
+            <p className="muted" style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.5 }}>Create the project first, then add and manage its services from the project workspace.</p>
           </div>
           <button className="btn btn-sm btn-ghost" onClick={onClose} aria-label="Close project drawer">
             <ICN.X size={15} />
@@ -265,31 +294,23 @@ function ProjectCreateDrawer({ open, projectTypes, creatingType, error, onClose,
         </div>
 
         <div className="project-create-options">
-          {projectTypes.map((type) => (
-            <button
-              key={type.id}
-              className="btn btn-ghost project-create-option"
-              disabled={!!creatingType}
-              onClick={() => onCreate(type)}
-            >
-              <span className="project-create-option__main">
-                <span className="project-create-option__icon">
-                  {iconForProjectType(type.id)}
-                </span>
-                <span className="project-create-option__copy">
-                  <span className="project-create-option__label">{type.label}</span>
-                  <span className="project-create-option__hint">{projectTypeHint(type.id)}</span>
-                </span>
-              </span>
-              <span className="project-create-option__action">{creatingType === type.id ? 'Creating...' : 'Create'}</span>
-            </button>
-          ))}
+          <div className="project-create-form">
+            <label className="project-field"><span>Project name</span><input autoFocus value={details.name} onChange={(e)=>setDetails({...details,name:e.target.value})}/></label>
+            <label className="project-field"><span>Description</span><textarea rows="3" placeholder="What is this project for?" value={details.description} onChange={(e)=>setDetails({...details,description:e.target.value})}/></label>
+            <label className="project-check"><input type="checkbox" checked={details.autoBillingEnabled} onChange={(e)=>setDetails({...details,autoBillingEnabled:e.target.checked})}/><span>Enable automatic billing</span></label>
+            {details.autoBillingEnabled && <div className="project-create-billing"><label className="project-field"><span>Amount</span><input type="number" min="0" step="0.01" value={details.billingAmount} onChange={(e)=>setDetails({...details,billingAmount:e.target.value})}/></label><label className="project-field"><span>Currency</span><select value={details.billingCurrency} onChange={(e)=>setDetails({...details,billingCurrency:e.target.value})}><option>PGK</option><option>USD</option><option>AUD</option></select></label><label className="project-field"><span>Interval</span><select value={details.billingInterval} onChange={(e)=>setDetails({...details,billingInterval:e.target.value})}><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option></select></label></div>}
+            <button className="btn btn-primary" disabled={!details.name.trim() || !!creatingType} onClick={()=>onCreate(details)}>{creatingType ? 'Creating project…' : 'Create project workspace'}</button>
+          </div>
           {error && <div style={{ color: 'var(--danger)', fontSize: 12, padding: '8px 2px' }}>{error}</div>}
         </div>
       </aside>
     </div>
-  );
+  ), document.body);
 }
+
+
+function SortTh({ label, column, sort, onSort }) { return <th><button className="project-sort" onClick={() => onSort(column)}>{label}<span>{sort.key === column ? (sort.direction === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>; }
+function formatStamp(value) { return value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—'; }
 
 function projectTypeHint(type) {
   return {

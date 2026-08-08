@@ -1790,7 +1790,7 @@ function ReviewTab({ sitePlan, templateId, templateType, onGenerate, generating,
       <div className="spb-review-section spb-review-section--note">
         <div className="spb-review-note-icon">ℹ</div>
         <div>
-          This will prepare a generated source copy from the chosen template, applying your brief, sitemap, and style direction, then hand it to the Hosting Deploy Engine for GitHub + Render deployment.
+          This will prepare a generated source copy from the chosen template, apply your brief, sitemap, and style direction, then hand it to Glondia Hosting for deployment.
         </div>
       </div>
 
@@ -1813,7 +1813,7 @@ function ReviewTab({ sitePlan, templateId, templateType, onGenerate, generating,
               </>
             ) : (
               <p style={{ fontSize:12, color:'var(--spb-muted)', marginTop:4 }}>
-                Make sure GitHub and Render credentials are set in{' '}
+                Make sure the hosting integration is configured in{' '}
                 <button className="spb-link-btn" onClick={() => navigate({ view:'settings' })}>Settings →</button>
               </p>
             )}

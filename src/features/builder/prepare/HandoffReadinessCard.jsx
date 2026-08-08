@@ -11,7 +11,11 @@ export function getHandoffReadinessChecks(config = {}, context = {}) {
   const publishDirectory = config.publishDirectory || config.outputDirectory || '';
   const startCommand = config.startCommand || '';
 
-  checks.push({ status: sourceRepository ? 'ok' : (context.sourceOptional ? 'warn' : 'error'), label: sourceRepository ? 'Source repository set' : (context.sourceOptional ? 'Source repository not set; server default will be used' : 'Source repository is required'), fix: null });
+  checks.push({
+    status: sourceRepository ? 'ok' : (context.sourceOptional ? 'ok' : 'error'),
+    label: sourceRepository ? 'Source connected' : (context.sourceOptional ? 'Source package ready' : 'Connect a source first'),
+    fix: null,
+  });
   checks.push({ status: branch ? 'ok' : 'error', label: branch ? `Branch set to ${branch}` : 'Branch is required', fix: null });
 
   if (rootDirectory.includes('/opt/render/project')) {
@@ -19,18 +23,18 @@ export function getHandoffReadinessChecks(config = {}, context = {}) {
   } else if (context.recommendedRoot && rootDirectory !== context.recommendedRoot) {
     checks.push({ status: 'warn', label: `Recommended root is ${context.recommendedRoot}`, fix: { label: `Use ${context.recommendedRoot}`, patch: { rootDirectory: context.recommendedRoot } } });
   } else {
-    checks.push({ status: rootDirectory ? 'ok' : 'warn', label: rootDirectory ? `Root directory set to ${rootDirectory}` : 'Root directory not set; repo root will be used', fix: null });
+    checks.push({ status: rootDirectory ? 'ok' : 'warn', label: rootDirectory ? `Project folder set to ${rootDirectory}` : 'Project folder not set; root will be used', fix: null });
   }
 
   if (serviceType === 'static_site') {
     checks.push({ status: buildCommand ? 'ok' : 'error', label: buildCommand ? 'Build command set' : 'Build command is required for static sites', fix: context.recommendedBuildCommand ? { label: `Use ${context.recommendedBuildCommand}`, patch: { buildCommand: context.recommendedBuildCommand } } : null });
-    checks.push({ status: publishDirectory ? 'ok' : 'error', label: publishDirectory ? `Publish directory set to ${publishDirectory}` : 'Publish directory is required for static sites', fix: context.recommendedPublishDirectory ? { label: `Use ${context.recommendedPublishDirectory}`, patch: { publishDirectory: context.recommendedPublishDirectory } } : null });
+    checks.push({ status: publishDirectory ? 'ok' : 'error', label: publishDirectory ? `Publish folder set to ${publishDirectory}` : 'Publish folder is required for static sites', fix: context.recommendedPublishDirectory ? { label: `Use ${context.recommendedPublishDirectory}`, patch: { publishDirectory: context.recommendedPublishDirectory } } : null });
   }
 
   if (serviceType === 'web_service') {
     checks.push({ status: buildCommand ? 'ok' : 'error', label: buildCommand ? 'Build command set' : 'Build command is required for web services', fix: context.recommendedBuildCommand ? { label: `Use ${context.recommendedBuildCommand}`, patch: { buildCommand: context.recommendedBuildCommand } } : null });
     checks.push({ status: startCommand ? 'ok' : 'error', label: startCommand ? 'Start command set' : 'Start command is required for web services', fix: context.recommendedStartCommand ? { label: `Use ${context.recommendedStartCommand}`, patch: { startCommand: context.recommendedStartCommand } } : null });
-    checks.push({ status: 'info', label: 'Web services must listen on process.env.PORT and bind to 0.0.0.0', fix: null });
+    checks.push({ status: 'info', label: 'Server apps must listen on process.env.PORT and bind to 0.0.0.0', fix: null });
   }
 
   return checks;
@@ -73,7 +77,7 @@ export function HandoffReadinessCard({ config, context, onApplyFix }) {
       {/* Header row — compact */}
       <div className="row between" style={{ marginBottom: 8 }}>
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <span className="eyebrow" style={{ margin: 0 }}>Handoff Doctor</span>
+          <span className="eyebrow" style={{ margin: 0 }}>Launch Check</span>
           <Badge tone={statusTone} dot={false}>{statusLabel}</Badge>
         </div>
         <Badge tone={score >= 100 ? 'success' : score >= 70 ? 'warn' : 'danger'} dot={false}>{score}%</Badge>

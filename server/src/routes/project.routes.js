@@ -16,6 +16,7 @@ router.get('/:projectId', ProjectController.getProject);
 router.get('/:projectId/summary', ProjectController.getProjectSummary);
 router.patch('/:projectId', ProjectController.updateProject);
 router.delete('/:projectId', ProjectController.archiveProject);
+router.post('/:projectId/services/:serviceType/:serviceId/actions', ProjectController.manageProjectService);
 
 // Deployments
 router.get('/:projectId/deployments', DeploymentController.listDeployments);

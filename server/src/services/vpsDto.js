@@ -23,6 +23,7 @@ export function isDummyRecord(record) {
 /** Customer-safe view of a VpsService record. */
 export function toCustomerVpsDto(r) {
   const isDummy = isDummyRecord(r);
+  const meta = safeJson(r.metadata);
   return {
     id:              r.id,
     label:           r.label,
@@ -40,7 +41,17 @@ export function toCustomerVpsDto(r) {
     totalPriceCents: r.totalPriceCents,
     currency:        r.currency || 'USD',
     paymentStatus:   r.paymentStatus,
-    connectionUsername: safeJson(r.metadata).connectionUsername || 'root',
+    connectionUsername: meta.connectionUsername || 'root',
+    backupsEnabled:  Boolean(meta.backupsEnabled),
+    backupSchedule:  meta.backupSchedule ?? null,
+    ddosProtection:  Boolean(meta.ddosProtectionEnabled),
+    ipv6Enabled:     Boolean(meta.ipv6Enabled),
+    userDataPresent: Boolean(meta.userDataPresent),
+    tags:            Array.isArray(meta.tags) ? meta.tags : [],
+    sshKeyAttached:  Boolean(meta.sshKeyId),
+    bandwidthUsedGb: Number(meta.bandwidthUsedGb ?? 0),
+    bandwidthUpdatedAt: meta.bandwidthUpdatedAt ?? null,
+    providerSyncedAt: meta.providerSyncedAt ?? null,
     testMode:        isDummy,
     createdAt:       r.createdAt,
     updatedAt:       r.updatedAt,

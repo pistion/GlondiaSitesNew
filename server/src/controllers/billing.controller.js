@@ -12,7 +12,11 @@ const BillingController = {
   getSummary: async (req, res, next) => {
     try {
       const userId = req.user?.id || null;
-      const summary = await getUserBillingSummary(userId);
+      const summary = await getUserBillingSummary(userId, {
+        organizationId: req.params.workspaceId,
+        serviceType: req.query.serviceType || null,
+        serviceId: req.query.serviceId || null,
+      });
       res.ok(summary);
     } catch (error) {
       next(error);

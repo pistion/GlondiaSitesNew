@@ -14,7 +14,7 @@ export default function RulesSection({ deploymentId }) {
   const load = () => listHostingRoutes(deploymentId)
     .then((data) => setRoutes(normalizeList(data, ['routes']).map((item) => ({ id: item.id || `${item.source}:${item.destination}`, source: item.source || item.from || '', destination: item.destination || item.to || '', type: item.type || 'rewrite' }))))
     .catch((error) => setErr(error.message || 'Could not load rules.'));
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
 
   const addRow = () => setRoutes((current) => [...current, { id: `new_${Date.now()}`, source: '', destination: '', type: 'rewrite' }]);
   const updateRow = (index, field, value) => setRoutes((current) => current.map((row, i) => i === index ? { ...row, [field]: value } : row));

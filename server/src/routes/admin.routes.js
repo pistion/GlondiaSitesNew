@@ -12,6 +12,8 @@ import { requirePermission } from '../middleware/requirePermission.middleware.js
 import { requireRecentMfa } from '../middleware/requireRecentMfa.middleware.js';
 import adminService from '../services/adminService.js';
 import * as adminCustomerCtrl from '../controllers/adminCustomerController.js';
+import * as hostingRepairCtrl from '../controllers/adminHostingRepairController.js';
+import * as controlPlaneCtrl from '../controllers/adminControlPlane.controller.js';
 import { adminTicketRouter } from './tickets.routes.js';
 import { adminServiceRequestRouter } from './service-requests.routes.js';
 import crmContactsRouter from './crm-contacts.routes.js';
@@ -31,6 +33,9 @@ import {
 const router = express.Router();
 
 router.use(authMiddleware, requireAdmin);
+
+// Canonical database-backed read models for the six related admin pages.
+router.get('/control-plane/:section(clients|hosting|vps|cloud-storage|domains|email|security)', controlPlaneCtrl.getSection);
 
 // ── ID photo upload (admin) ───────────────────────────────────────────────────
 const ID_PHOTO_MAX_BYTES = Number(process.env.ID_PHOTO_MAX_BYTES || 5 * 1024 * 1024);
@@ -91,6 +96,10 @@ router.get('/users', async (req, res, next) => {
 
 router.get('/deployments', async (req, res, next) => {
   try { res.json({ data: await adminService.listDeployments(null), requestId: req.id }); } catch (e) { next(e); }
+});
+
+router.get('/vps-services', async (req, res, next) => {
+  try { res.json({ data: await adminService.listVpsServices(null), requestId: req.id }); } catch (e) { next(e); }
 });
 
 router.get('/orders', async (req, res, next) => {
@@ -261,6 +270,20 @@ router.post('/deployments/:deploymentId/render-plan', async (req, res, next) => 
 });
 
 // ── Tickets ───────────────────────────────────────────────────────────────────
+router.post('/repairs/hosting/audit',
+  requirePermission('services:manage'),
+  hostingRepairCtrl.auditHosting);
+
+router.post('/repairs/hosting/run',
+  requirePermission('services:manage'),
+  requireRecentMfa(),
+  hostingRepairCtrl.runHostingRepair);
+
+router.post('/services/hosting/:serviceId/repair',
+  requirePermission('services:manage'),
+  requireRecentMfa(),
+  hostingRepairCtrl.repairHostingService);
+
 router.use('/tickets', adminTicketRouter);
 
 // CRM Service Requests (intake/consultation — not support tickets)

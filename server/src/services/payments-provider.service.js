@@ -12,17 +12,12 @@ import {
   cleanDomainName,
   getSpaceshipSettings,
 } from './providerSpaceship.service.js';
-import deploymentService from './deploymentService.js';
-import { makeId, mutateHostingStore, nowIso, readHostingStore } from './hostingStore.js';
+import { makeId, nowIso } from './hostingStore.js';
+import { recordRegisteredDomains } from './customerDomainService.js';
+import { prisma } from './db.js';
+import { issueInvoice, recordPaymentTransaction } from './billingRecordsService.js';
 
 // ── Fallback TLD pricing (used when registrar does not return a price) ─────────
-export const FALLBACK_TLD_PRICE_CENTS = new Map([
-  ['.com', 1499], ['.com.pg', 4999], ['.com.fj', 5999], ['.com.vu', 4499],
-  ['.co', 2499], ['.io', 3999], ['.app', 1699], ['.dev', 1499],
-  ['.org', 1249], ['.net', 1199], ['.store', 499], ['.shop', 199],
-]);
-// Pre-sorted longest-first so multi-part TLDs (.com.pg) match before shorter ones (.com)
-export const FALLBACK_TLD_SUFFIXES = [...FALLBACK_TLD_PRICE_CENTS.keys()].sort((a, b) => b.length - a.length);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,19 +41,7 @@ export function getPaypalClientSettings() {
 export function domainActualPriceCents(domain, availabilityRow) {
   const premium = availabilityRow?.pricing?.amount;
   if (premium != null && Number.isFinite(Number(premium))) return Math.max(0, Math.round(Number(premium)));
-  const tld = FALLBACK_TLD_SUFFIXES.find((suffix) => domain.endsWith(suffix));
-  if (!tld) throw httpError(`No registrar price is configured for ${domain}.`, 400);
-  return FALLBACK_TLD_PRICE_CENTS.get(tld);
-}
-
-export function hostingActualCostCents(input = {}) {
-  const supplied = Number(input.actualAmountCents || input.hostingCostCents || 0);
-  if (Number.isFinite(supplied) && supplied > 0) return Math.round(supplied);
-  const plan = String(input.plan || 'starter').toLowerCase();
-  if (plan === 'free') return 0;
-  if (plan === 'standard') return 2500;
-  if (plan === 'pro') return 8500;
-  return 700;
+  throw httpError(`The registrar did not return a current price for ${domain}.`, 409);
 }
 
 export function sanitizeContact(input = {}) {
@@ -158,15 +141,9 @@ export async function createPayPalOrder({ checkoutOrderId, type, totalAmountCent
         ...lineItems.map((item) => ({
           name: item.name,
           quantity: '1',
-          unit_amount: { currency_code: 'USD', value: centsToUsd(item.actualAmountCents) },
+          unit_amount: { currency_code: 'USD', value: centsToUsd(item.customerAmountCents) },
           category: 'DIGITAL_GOODS',
         })),
-        ...(amounts.markupAmountCents > 0 ? [{
-          name: 'Glondia platform service fee',
-          quantity: '1',
-          unit_amount: { currency_code: 'USD', value: centsToUsd(amounts.markupAmountCents) },
-          category: 'DIGITAL_GOODS',
-        }] : []),
       ],
     }],
     application_context: {
@@ -177,14 +154,10 @@ export async function createPayPalOrder({ checkoutOrderId, type, totalAmountCent
       cancel_url: safeReturnUrl(cancelUrl || returnUrl),
     },
   };
-  const response = await fetch(`${paypalBaseUrl()}/v2/checkout/orders`, {
-    method: 'POST',
-    headers: await paypalHeaders(),
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw httpError(payload?.message || 'PayPal order creation failed.', response.status, payload);
-  return { id: payload.id, approvalUrl: payload.links?.find((link) => link.rel === 'approve')?.href, payload };
+  // Shared vault helper: request vault-on-success when enabled; fall back cleanly.
+  const { createPaypalOrderWithOptionalVault } = await import('./paymentMethodService.js');
+  const created = await createPaypalOrderWithOptionalVault(body);
+  return { id: created.id, approvalUrl: created.approvalUrl, payload: created.payload };
 }
 
 export async function capturePayPalOrder(providerOrderId) {
@@ -217,10 +190,22 @@ export async function refundPayPalCapture(captureId) {
 
 export async function createCheckoutOrder({ type, user, source, lineItems, metadata }) {
   assertPayPalConfigured();
-  const actualAmountCents = lineItems.reduce((sum, item) => sum + item.actualAmountCents, 0);
   const markupPercent = getPlatformMarkupPercent();
-  const markupAmountCents = Math.round(actualAmountCents * markupPercent / 100);
-  const totalAmountCents = actualAmountCents + markupAmountCents;
+  const ratedLineItems = lineItems.map((item) => {
+    const actualAmountCents = Math.max(0, Math.round(Number(item.actualAmountCents || 0)));
+    const lineMarkupPercent = Math.max(0, Number(item.markupPercent ?? markupPercent));
+    const markupAmountCents = Math.round(actualAmountCents * lineMarkupPercent / 100);
+    return {
+      ...item,
+      actualAmountCents,
+      markupPercent: lineMarkupPercent,
+      markupAmountCents,
+      customerAmountCents: actualAmountCents + markupAmountCents,
+    };
+  });
+  const actualAmountCents = ratedLineItems.reduce((sum, item) => sum + item.actualAmountCents, 0);
+  const markupAmountCents = ratedLineItems.reduce((sum, item) => sum + item.markupAmountCents, 0);
+  const totalAmountCents = ratedLineItems.reduce((sum, item) => sum + item.customerAmountCents, 0);
   const id = makeId('checkout');
   const amounts = {
     currency: 'USD',
@@ -236,76 +221,89 @@ export async function createCheckoutOrder({ type, user, source, lineItems, metad
     checkoutOrderId: id,
     type,
     totalAmountCents,
-    lineItems,
+    lineItems: ratedLineItems,
     amounts,
     returnUrl: source?.returnUrl,
     cancelUrl: source?.cancelUrl,
   });
-  const order = {
-    id,
-    organizationId: source?.organizationId || user.organizationId || 'local-org',
-    userId: user.id || 'local-user',
-    type,
-    provider: 'paypal',
-    providerOrderId: paypal.id,
-    status: 'pending',
-    currency: 'USD',
-    actualAmountCents,
-    markupPercent,
-    markupAmountCents,
-    totalAmountCents,
-    amounts,
-    lineItems,
-    metadata,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-  await mutateHostingStore((store) => {
-    store.checkoutOrders = store.checkoutOrders || [];
-    store.payments = store.payments || [];
-    store.checkoutOrders.unshift(order);
-    return order;
+  await prisma.checkoutOrder.create({
+    data: {
+      id,
+      organizationId: source?.organizationId || user.organizationId || user.id || 'local-org',
+      userId: user.id && user.id !== 'local-user' ? user.id : null,
+      type,
+      provider: 'paypal',
+      providerOrderId: paypal.id,
+      status: 'pending',
+      currency: 'USD',
+      actualAmountCents,
+      markupPercent,
+      markupAmountCents,
+      totalAmountCents,
+      deploymentId: metadata?.deploymentId || null,
+      metadata: JSON.stringify({
+        ...(metadata || {}),
+        billingPayload: { amounts, lineItems: ratedLineItems },
+      }),
+    },
   });
-  return { checkoutOrderId: id, providerOrderId: paypal.id, approvalUrl: paypal.approvalUrl, amounts, lineItems };
+  return { checkoutOrderId: id, providerOrderId: paypal.id, approvalUrl: paypal.approvalUrl, amounts, lineItems: ratedLineItems };
 }
 
-export async function getCheckoutOrder(checkoutOrderId) {
-  const id = String(checkoutOrderId || '').trim();
-  if (!id) throw httpError('checkoutOrderId is required.', 400);
-  const store = await readHostingStore();
-  const order = (store.checkoutOrders || []).find((item) => item.id === id);
-  if (!order) throw httpError('Checkout order not found.', 404);
+function safeJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value || '{}'); } catch { return {}; }
+}
+
+export function assertCheckoutOrderOwner(order, user = {}) {
+  const userId = String(user?.id || '').trim();
+  if (!userId || userId === 'local-user' || !order || order.userId !== userId) {
+    throw httpError('Checkout order not found.', 404);
+  }
   return order;
 }
 
+export async function getCheckoutOrder(checkoutOrderId, user = null) {
+  const id = String(checkoutOrderId || '').trim();
+  if (!id) throw httpError('checkoutOrderId is required.', 400);
+  const row = await prisma.checkoutOrder.findUnique({ where: { id } });
+  const parsed = row ? safeJson(row.metadata) : {};
+  const order = row ? {
+    ...row,
+    metadata: parsed,
+    amounts: parsed.billingPayload?.amounts || {
+      currency: row.currency,
+      actualAmountCents: row.actualAmountCents,
+      markupPercent: row.markupPercent,
+      markupAmountCents: row.markupAmountCents,
+      totalAmountCents: row.totalAmountCents,
+    },
+    lineItems: parsed.billingPayload?.lineItems || [],
+  } : null;
+  if (!order) throw httpError('Checkout order not found.', 404);
+  return user ? assertCheckoutOrderOwner(order, user) : order;
+}
+
 export async function markCheckoutPaid(checkoutOrderId, providerCaptureId, result, user = {}) {
-  return mutateHostingStore((store) => {
-    const order = (store.checkoutOrders || []).find((item) => item.id === checkoutOrderId);
-    if (!order) return result;
-    if (order.status === 'paid') return order.result;
-    Object.assign(order, { status: 'paid', providerCaptureId, result, updatedAt: nowIso() });
-    store.payments = store.payments || [];
-    store.payments.unshift({
-      id: makeId('pay'),
-      checkoutOrderId: order.id,
-      organizationId: order.organizationId,
-      userId: user.id || order.userId,
-      type: order.type,
-      provider: 'paypal',
-      providerOrderId: order.providerOrderId,
-      providerCaptureId,
+  const order = await prisma.checkoutOrder.findUnique({ where: { id: checkoutOrderId } });
+  if (!order || order.status === 'paid') return result;
+  const paidOrder = await prisma.checkoutOrder.update({
+    where: { id: checkoutOrderId },
+    data: {
       status: 'paid',
-      currency: order.currency,
-      actualAmountCents: order.actualAmountCents,
-      markupPercent: order.markupPercent,
-      markupAmountCents: order.markupAmountCents,
-      totalAmountCents: order.totalAmountCents,
-      metadata: order.metadata,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-    });
-    return result;
+      providerCaptureId,
+      paidAt: new Date(),
+      metadata: JSON.stringify({ ...safeJson(order.metadata), result }),
+    },
   });
+  await recordPaymentTransaction({
+    order: paidOrder,
+    provider: 'paypal',
+    providerTransactionId: providerCaptureId,
+    status: 'completed',
+    metadata: { source: 'payments_provider', actorUserId: user.id || order.userId || null },
+  });
+  return result;
 }
 
 // ── Domain payment ────────────────────────────────────────────────────────────
@@ -320,9 +318,8 @@ function assertSpaceshipConfigured() {
   }
 }
 
-export async function createDomainPaymentOrder(input = {}, user = {}) {
+export async function validateDomainCart(input = {}) {
   assertSpaceshipConfigured();
-  assertPayPalConfigured();
 
   const domains = Array.isArray(input.domains) ? input.domains : [];
   if (!domains.length) throw httpError('At least one domain is required.', 400);
@@ -332,13 +329,57 @@ export async function createDomainPaymentOrder(input = {}, user = {}) {
   }));
   // Real availability check before creating any PayPal order.
   const availability = await checkSpaceshipAvailability(normalized.map((item) => item.name));
+  const markupPercent = getPlatformMarkupPercent();
   const lines = normalized.map((item) => {
     const row = availability.domains.find((candidate) => candidate.domain === item.name);
     if (!row) throw httpError(`Could not verify availability for ${item.name}.`, 502);
     if (!row.available) throw httpError(`${item.name} is no longer available.`, 409);
     const actualAmountCents = domainActualPriceCents(item.name, row) * item.years;
-    return { type: 'domain_registration', name: item.name, years: item.years, actualAmountCents };
+    const markupAmountCents = Math.round(actualAmountCents * markupPercent / 100);
+    return {
+      type: 'domain_registration',
+      name: item.name,
+      years: item.years,
+      available: true,
+      status: row.status,
+      actualAmountCents,
+      actualAmount: centsToUsd(actualAmountCents),
+      markupAmountCents,
+      customerAmountCents: actualAmountCents + markupAmountCents,
+      pricingSource: 'provider_api',
+    };
   });
+  const actualAmountCents = lines.reduce((sum, item) => sum + item.actualAmountCents, 0);
+  const markupAmountCents = lines.reduce((sum, item) => sum + item.markupAmountCents, 0);
+  const totalAmountCents = lines.reduce((sum, item) => sum + item.customerAmountCents, 0);
+  return {
+    valid: true,
+    provider: 'spaceship',
+    checkedAt: nowIso(),
+    domains: lines,
+    amounts: {
+      currency: 'USD',
+      actualAmountCents,
+      markupPercent,
+      markupAmountCents,
+      totalAmountCents,
+      actualAmount: centsToUsd(actualAmountCents),
+      markupAmount: centsToUsd(markupAmountCents),
+      totalAmount: centsToUsd(totalAmountCents),
+    },
+  };
+}
+
+export async function createDomainPaymentOrder(input = {}, user = {}) {
+  assertPayPalConfigured();
+  const quote = await validateDomainCart(input);
+  const normalized = quote.domains.map((item) => ({ name: item.name, years: item.years }));
+  const lines = quote.domains.map((item) => ({
+    type: item.type,
+    name: item.name,
+    years: item.years,
+    actualAmountCents: item.actualAmountCents,
+  }));
   return createCheckoutOrder({
     type: 'domain_purchase',
     user,
@@ -357,7 +398,7 @@ export async function captureDomainPaymentOrder(input = {}, user = {}) {
   assertSpaceshipConfigured();
   assertPayPalConfigured();
 
-  const order = await getCheckoutOrder(input.checkoutOrderId);
+  const order = await getCheckoutOrder(input.checkoutOrderId, user);
   if (order.type !== 'domain_purchase') throw httpError('Checkout order is not for a domain purchase.', 400);
   if (order.status === 'paid') return order.result;
 
@@ -401,7 +442,32 @@ export async function captureDomainPaymentOrder(input = {}, user = {}) {
     throw httpError(`Domain registration failed after payment: ${registrationError.message}. A refund has been requested.`, 500);
   }
 
-  const result = { status: 'paid', checkoutOrderId: order.id, operations, amounts: order.amounts };
+  const registeredDomains = await recordRegisteredDomains({
+    user,
+    order,
+    domains: order.lineItems || domains,
+    operations,
+    contact,
+  });
+  // Best-effort vault save — domain checkout also seeds the shared wallet.
+  let paymentMethod = null;
+  try {
+    const { savePaymentMethodFromCapture } = await import('./paymentMethodService.js');
+    paymentMethod = await savePaymentMethodFromCapture({
+      userId: user?.id || order.userId,
+      organizationId: order.organizationId,
+      capturePayload,
+      productType: 'domain',
+    });
+  } catch { /* non-fatal */ }
+  const result = {
+    status: 'paid',
+    checkoutOrderId: order.id,
+    operations,
+    amounts: order.amounts,
+    domains: registeredDomains,
+    paymentMethod,
+  };
   await markCheckoutPaid(order.id, providerOrderId, result, user);
   return result;
 }
@@ -409,95 +475,150 @@ export async function captureDomainPaymentOrder(input = {}, user = {}) {
 // ── Hosting payment ───────────────────────────────────────────────────────────
 
 export async function createHostingPaymentOrder(input = {}, user = {}) {
-  // New flow: pay for an already-running deployment from the Billing tab
-  if (input.deploymentId) {
-    const store = await readHostingStore();
-    const dep = (store.deployments || []).find((d) => d.deploymentId === input.deploymentId || d.id === input.deploymentId);
-    if (!dep) throw httpError('Deployment not found.', 404);
-    const existing = (store.checkoutOrders || []).find(
-      (o) => o.type === 'hosting_deployment' && o.status === 'paid' && o.metadata?.deploymentId === input.deploymentId
-    );
-    if (existing) throw httpError('This deployment has already been paid for.', 409);
-    const actualAmountCents = hostingActualCostCents(dep);
-    return createCheckoutOrder({
-      type: 'hosting_deployment',
-      user,
-      source: input,
-      lineItems: [{ type: 'render_deployment', name: dep.serviceName || 'Render hosting', actualAmountCents }],
-      metadata: { deploymentId: dep.deploymentId },
-    });
+  if (!input.deploymentId) throw httpError('deploymentId is required.', 400);
+  const {
+    findDeploymentRecord,
+    createDeploymentOrder,
+  } = await import('./deploymentBillingService.js');
+  const { createDeploymentPaypalOrder } = await import('./deploymentPaypalService.js');
+  const deployment = await findDeploymentRecord(input.deploymentId);
+  if (!deployment || !user?.id || (deployment.userId && deployment.userId !== user.id)) {
+    throw httpError('Deployment not found.', 404);
   }
-
-  // Legacy flow: deploy-then-pay (kept for compat, no longer called from builder)
-  const deploymentPayload = input.deployment || input;
-  if (!(deploymentPayload.repoUrl || deploymentPayload.repositoryUrl || deploymentPayload.sourceReference || deploymentPayload.renderServiceId || deploymentPayload.serviceId)) {
-    throw httpError('A repository or existing hosting service is required before hosting checkout.', 400);
+  const summary = await createDeploymentOrder({ deployment, user, kind: 'invoice_payment' });
+  if (!summary.checkoutOrderId) {
+    throw httpError('No payable hosting invoice exists yet.', 409);
   }
-  const actualAmountCents = hostingActualCostCents(deploymentPayload);
-  return createCheckoutOrder({
-    type: 'hosting_deployment',
-    user,
-    source: input,
-    lineItems: [{ type: 'render_deployment', name: deploymentPayload.name || deploymentPayload.serviceName || 'Hosting deployment', actualAmountCents }],
-    metadata: { deploymentPayload },
-  });
+  return createDeploymentPaypalOrder({ checkoutOrderId: summary.checkoutOrderId, user });
 }
 
-export async function captureHostingPaymentOrder(input = {}, user = {}) {
-  const order = await getCheckoutOrder(input.checkoutOrderId);
-  if (order.type !== 'hosting_deployment') throw httpError('Checkout order is not for hosting.', 400);
-  if (order.status === 'paid') return order.result;
+export async function createDomainAddonPaymentOrder(input = {}, user = {}) {
+  const addonServiceId = String(input.addonServiceId || '').trim();
+  if (!addonServiceId) throw httpError('addonServiceId is required.', 400);
+  const addon = await prisma.domainAddonService.findFirst({
+    where: {
+      id: addonServiceId,
+      userId: user.id,
+      status: 'awaiting_payment',
+      paymentStatus: { not: 'paid' },
+    },
+  });
+  if (!addon) throw httpError('Charged Glondia add-on not found.', 404);
+  if (addon.providerAmountCents <= 0 || addon.totalAmountCents <= 0) {
+    throw httpError('This included service does not require checkout.', 409);
+  }
+  const checkout = await createCheckoutOrder({
+    type: 'domain_addon',
+    user,
+    source: { organizationId: addon.organizationId },
+    lineItems: [{
+      type: 'domain_addon',
+      name: addon.name,
+      actualAmountCents: addon.providerAmountCents,
+      markupPercent: addon.markupPercent,
+    }],
+    metadata: {
+      domainServiceId: addon.domainServiceId,
+      addonServiceId: addon.id,
+      addonKey: addon.addonKey,
+    },
+  });
+  const invoice = await issueInvoice({
+    userId: addon.userId,
+    organizationId: addon.organizationId,
+    orderId: checkout.checkoutOrderId,
+    invoiceNumber: `GLD-ADDON-${checkout.checkoutOrderId}`,
+    currency: addon.currency,
+    status: 'issued',
+    lineItems: [{
+      serviceType: 'domain_addon',
+      serviceId: addon.id,
+      sourceTable: 'domain_addon_services',
+      sourceId: addon.id,
+      lineClassification: 'recurring_charge',
+      description: `${addon.name} domain protection`,
+      providerAmountCents: addon.providerAmountCents,
+      markupPercent: addon.markupPercent,
+      markupAmountCents: addon.markupAmountCents,
+      unitCents: addon.totalAmountCents,
+      totalCents: addon.totalAmountCents,
+      metadata: { provider: addon.internalProvider, addonKey: addon.addonKey },
+    }],
+    metadata: {
+      category: 'domain_addon',
+      domainServiceId: addon.domainServiceId,
+      addonServiceId: addon.id,
+    },
+  });
+  await prisma.domainAddonService.update({
+    where: { id: addon.id },
+    data: {
+      checkoutOrderId: checkout.checkoutOrderId,
+      invoiceId: invoice.id,
+      billingStatus: 'invoiced',
+    },
+  });
+  return { ...checkout, invoiceId: invoice.id };
+}
 
+export async function captureDomainAddonPaymentOrder(input = {}, user = {}) {
+  const order = await getCheckoutOrder(input.checkoutOrderId, user);
+  if (order.type !== 'domain_addon') throw httpError('Checkout order is not for a domain add-on.', 400);
+  if (order.status === 'paid') return order.result || order;
+  const addon = await prisma.domainAddonService.findFirst({
+    where: { checkoutOrderId: order.id, userId: user.id },
+  });
+  if (!addon) throw httpError('Charged Glondia add-on not found.', 404);
   const providerOrderId = input.providerOrderId || input.orderId || order.providerOrderId;
   const capturePayload = await capturePayPalOrder(providerOrderId);
-  const captureId = capturePayload?.purchase_units?.[0]?.payments?.captures?.[0]?.id;
-
-  // New path: payment for an already-deployed service from the Billing tab
-  if (order.metadata?.deploymentId) {
-    const result = { status: 'paid', checkoutOrderId: order.id, deploymentId: order.metadata.deploymentId, amounts: order.amounts };
-    await markCheckoutPaid(order.id, providerOrderId, result, user);
-    await mutateHostingStore((store) => {
-      const dep = (store.deployments || []).find((d) => d.deploymentId === order.metadata.deploymentId);
-      if (dep) { dep.paymentStatus = 'paid'; dep.updatedAt = nowIso(); }
-    });
-    return result;
-  }
-
-  // Legacy path: deploy-then-pay (kept for compat)
-  let deployment;
-  try {
-    deployment = await deploymentService.createRenderDeployment(order.metadata.deploymentPayload || {}, { userId: user.id || 'local-user' });
-  } catch (deployError) {
-    if (captureId) await refundPayPalCapture(captureId).catch(() => {});
-    throw httpError(`Render deployment failed after payment: ${deployError.message}. A refund has been requested.`, 500);
-  }
-
-  const result = { status: 'paid', checkoutOrderId: order.id, deployment, amounts: order.amounts };
+  const result = {
+    status: 'paid',
+    checkoutOrderId: order.id,
+    addonServiceId: addon.id,
+    addonKey: addon.addonKey,
+    domainServiceId: addon.domainServiceId,
+    amounts: order.amounts,
+  };
   await markCheckoutPaid(order.id, providerOrderId, result, user);
   return result;
 }
 
-export async function getHostingPaymentStatus(deploymentId) {
-  const GRACE_MS = Number(process.env.PAYMENT_GRACE_HOURS || 24) * 60 * 60 * 1000;
-  const store = await readHostingStore();
-  const dep = (store.deployments || []).find((d) => d.deploymentId === deploymentId || d.id === deploymentId);
-  const paidOrder = (store.checkoutOrders || []).find(
-    (o) => o.type === 'hosting_deployment' && o.status === 'paid' && o.metadata?.deploymentId === deploymentId
-  );
-  const deployedAt = dep?.createdAt ? new Date(dep.createdAt).getTime() : null;
-  const deadline = deployedAt ? deployedAt + GRACE_MS : null;
-  const msRemaining = deadline ? Math.max(0, deadline - Date.now()) : null;
+export async function captureHostingPaymentOrder(input = {}, user = {}) {
+  const order = await getCheckoutOrder(input.checkoutOrderId, user);
+  if (order.type !== 'deployment') throw httpError('Checkout order is not for a hosting invoice.', 400);
+  const { captureDeploymentPaypalOrder } = await import('./deploymentPaypalService.js');
+  return captureDeploymentPaypalOrder({
+    paypalOrderId: input.providerOrderId || input.orderId || order.providerOrderId,
+    user,
+  });
+}
+
+export async function getHostingPaymentStatus(deploymentId, user = {}) {
+  const { findDeploymentRecord } = await import('./deploymentBillingService.js');
+  const deployment = await findDeploymentRecord(deploymentId);
+  if (!deployment || !user?.id || (deployment.userId && deployment.userId !== user.id)) {
+    throw httpError('Deployment not found.', 404);
+  }
+  const invoice = await prisma.invoice.findFirst({
+    where: {
+      userId: user.id,
+      lineItems: { some: { serviceType: 'hosting', serviceId: deploymentId } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  const transactions = invoice
+    ? await prisma.paymentTransaction.findMany({ where: { invoiceId: invoice.id }, orderBy: { createdAt: 'desc' } })
+    : [];
   return {
     deploymentId,
-    paid: Boolean(paidOrder),
-    paymentStatus: dep?.paymentStatus || (paidOrder ? 'paid' : 'pending'),
-    graceHours: Number(process.env.PAYMENT_GRACE_HOURS || 24),
-    deployedAt: dep?.createdAt || null,
-    deadlineAt: deadline ? new Date(deadline).toISOString() : null,
-    hoursRemaining: msRemaining != null ? Math.ceil(msRemaining / (1000 * 3600)) : null,
-    minutesRemaining: msRemaining != null ? Math.ceil(msRemaining / 60000) : null,
-    overdue: deployedAt ? Date.now() > deployedAt + GRACE_MS : false,
-    paidAt: paidOrder?.updatedAt || null,
-    amounts: paidOrder?.amounts || null,
+    invoiceId: invoice?.id || null,
+    invoiceNumber: invoice?.invoiceNumber || null,
+    paid: invoice?.status === 'paid',
+    paymentStatus: transactions[0]?.status || invoice?.status || 'metering',
+    dueAt: invoice?.dueAt || null,
+    overdue: invoice?.status === 'overdue',
+    paidAt: invoice?.paidAt || null,
+    amountCents: invoice?.totalCents ?? null,
+    currency: invoice?.currency || null,
   };
 }

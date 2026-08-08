@@ -23,11 +23,18 @@ import {
   updateDeploymentRecord,
 } from '../../00-SHARED/deploymentRecordStore.js';
 import { createAndTriggerRenderDeploy } from '../05-RENDER-DEPLOY-MOUNTAIN/renderDeploy.stage.js';
+import { publishStaticSiteToVps } from '../06-VPS-HOSTING-MOUNTAIN/vpsHostingPublisher.stage.js';
 import { startPostDeployPolling } from '../../../services/deploymentPostDeployPoller.js';
 
 export async function run(input = {}, context = {}) {
   const normalized = normalizeZipUploadInput(input, context);
   const { file, fields, siteName, slug, uploadId, siteDir, targetRoot, sourceRepo, branch } = normalized;
+  const requestedProvider = fields.hostingTarget || fields.hostingProvider || '';
+  const dedicatedRequested = ['vultr', 'dedicated', 'dedicated-vultr'].includes(String(requestedProvider).toLowerCase());
+  // Customer input cannot select the infrastructure vendor. Direct Render is
+  // reserved for explicit admin operations; normal deployments start on the
+  // Glondia hosting server and fail over internally when necessary.
+  const useSharedServer = !dedicatedRequested && !(context.isAdmin === true && String(requestedProvider).toLowerCase() === 'render');
   const cfg = getRuntimeConfig();
 
   // Launch-first rule: every deployment starts on the free plan. Only an admin
@@ -44,6 +51,8 @@ export async function run(input = {}, context = {}) {
     siteId: fields.siteId || null,
     projectId: fields.projectId || fields.siteId || null,
     serviceName: renderSafeName(siteName),
+    provider: dedicatedRequested ? 'vultr' : useSharedServer ? 'vps' : 'render',
+    plan: fields.dedicatedTier || fields.dedicatedPlanId || null,
     source: 'zip-upload',
     sourceReference: file.originalname,
     repoUrl: sourceRepo || null,
@@ -62,8 +71,44 @@ export async function run(input = {}, context = {}) {
   });
 
   try {
-    await addDeploymentLog(deployment.deploymentId, `ZIP upload received: ${file.originalname}.`, 'info');
+    const logStage = (stage, message, level = 'info', details = {}) =>
+      addDeploymentLog(deployment.deploymentId, message, level, { stage, ...details });
+    const setStage = async (stage, currentStep, buildStatus, message) => {
+      await updateDeploymentRecord(deployment.deploymentId, { currentStep, buildStatus });
+      if (message) await logStage(stage, message);
+    };
+    if (dedicatedRequested && !fields.dedicatedTier) {
+      await logStage('provider_select', 'Dedicated hosting tier was not recorded; deployment stopped before provisioning.', 'error');
+      return updateDeploymentRecord(deployment.deploymentId, {
+        platformDeployed: false,
+        status: 'failed',
+        buildStatus: 'configuration_required',
+        currentStep: 'Choose dedicated hosting tier',
+        paymentStatus: 'not_billable_yet',
+        errorMessage: 'Choose a dedicated hosting tier before deploying.',
+      });
+    }
+    if (dedicatedRequested) {
+      await logStage('provider_select', `Dedicated ${fields.dedicatedTier} hosting request recorded.`, 'ok', {
+        tier: fields.dedicatedTier,
+        requestedPlan: fields.dedicatedPlanId || null,
+      });
+    }
+
+    await logStage('upload', `ZIP upload received: ${file.originalname} (${file.size} bytes).`, 'info', {
+      fileName: file.originalname,
+      bytes: file.size,
+    });
+    await logStage('provider_select', `Selected hosting target: ${useSharedServer ? 'Glondia Shared Server' : 'Render'}.`, 'info', {
+      provider: useSharedServer ? 'vps' : 'render',
+    });
+    await setStage('extract', 'Extracting ZIP archive', 'extracting', 'Validating archive paths and extracting deployable files.');
     const extracted = await extractZipSafely(file.buffer || file.path, siteDir);
+    await logStage('extract', `ZIP extraction complete: ${extracted.files.length} deployable files, ${extracted.ignoredFiles.length} ignored.`, 'ok', {
+      deployableFiles: extracted.files.length,
+      ignoredFiles: extracted.ignoredFiles.length,
+    });
+    await setStage('detect', 'Detecting project', 'detecting', 'Inspecting package files, framework, runtime, and output directory.');
     const detected = await detectProject(siteDir, extracted.files);
     // Resolve the deploy mode (auto unless the user picked one) and let it drive
     // the build script and Render service settings.
@@ -77,6 +122,13 @@ export async function run(input = {}, context = {}) {
       ...detected,
       serviceType: resolvedMode.serviceType,
       detectedBuildCommand: resolvedMode.buildCommand,
+      publishDirectory: resolvedMode.publishDirectory,
+    });
+    await logStage('detect', `Project detected: ${detected.framework} (${detected.type}); package manager ${detected.packageManager || 'npm'}.`, 'ok', {
+      framework: detected.framework,
+      projectType: detected.type,
+      packageManager: detected.packageManager || 'npm',
+      buildCommand: resolvedMode.buildCommand,
       publishDirectory: resolvedMode.publishDirectory,
     });
     const manifest = await writeManifest(siteDir, deployment.deploymentId, uploadId, file.originalname, targetRoot, sourceRepo, branch, detected, extracted);
@@ -115,14 +167,89 @@ export async function run(input = {}, context = {}) {
       );
     }
 
+    if (dedicatedRequested) {
+      await logStage('provision', 'Source intake is recorded and waiting for the managed dedicated provisioning worker.', 'info');
+      return updateDeploymentRecord(deployment.deploymentId, {
+        ...baseUpdate,
+        provider: 'vultr',
+        hostingPlan: 'dedicated',
+        dedicatedTier: fields.dedicatedTier,
+        dedicatedPlanId: fields.dedicatedPlanId || null,
+        platformDeployed: false,
+        status: 'ready',
+        buildStatus: 'provisioning_queued',
+        currentStep: 'Dedicated server provisioning queued',
+        paymentStatus: 'not_billable_yet',
+      });
+    }
+
+    if (useSharedServer) {
+      try {
+        await setStage('server_pull', 'Preparing hosting server workspace', 'preparing_server', 'Hosting server is copying the extracted source into an isolated build workspace.');
+        const vpsResult = await publishStaticSiteToVps({
+        deploymentId: deployment.deploymentId,
+        sourceDir: siteDir,
+        serviceType,
+        buildCommand: shell.buildCommand,
+        publishDirectory: outputDirectory,
+        onLog: ({ message, level, source, stage }) =>
+          addDeploymentLog(deployment.deploymentId, message, level, { source, stage }),
+      });
+      await logStage('publish', `Build output copied to the public hosting directory (${outputDirectory}).`, 'ok', { source: 'vps' });
+      await logStage('verify', 'Nginx configuration validated and reloaded.', 'ok', { source: 'vps' });
+      await addDeploymentLog(deployment.deploymentId, `Published to Glondia hosting server: ${vpsResult.liveUrl}`, 'ok', {
+        provider: 'vps',
+        publicPath: vpsResult.publicPath,
+        publishDirectory: vpsResult.publishDirectory,
+      });
+        return updateDeploymentRecord(deployment.deploymentId, {
+        ...baseUpdate,
+        provider: 'vps',
+        platformDeployed: true,
+        status: 'live',
+        buildStatus: 'succeeded',
+        currentStep: 'Live on Glondia hosting server',
+        paymentStatus: 'billing_pending',
+        subscriptionStatus: 'trial_pending',
+        billingAttachStatus: 'queued',
+        renderServiceId: vpsResult.serviceId,
+        renderDeployId: vpsResult.deployId,
+        providerServiceId: vpsResult.serviceId,
+        providerDeployId: vpsResult.deployId,
+        providerStatus: vpsResult.providerStatus,
+        liveUrl: vpsResult.liveUrl,
+        verifiedUrl: vpsResult.liveUrl,
+        urlReachable: true,
+        vpsHosting: vpsResult,
+        render: null,
+        errorMessage: null,
+        lastDeployedAt: new Date().toISOString(),
+        });
+      } catch (primaryError) {
+        if (!renderApiService.configured()) throw primaryError;
+        await updateDeploymentRecord(deployment.deploymentId, {
+          providerFailover: {
+            from: 'vps',
+            to: 'render',
+            reason: primaryError.message,
+            stage: primaryError.stage || 'vps_publish',
+            occurredAt: new Date().toISOString(),
+          },
+          currentStep: 'Retrying deployment',
+          buildStatus: 'retrying',
+        });
+      }
+    }
+
     if (!useTemporaryRepo && !hasRealValue(sourceRepo)) {
-      return ready(deployment.deploymentId, baseUpdate, 'Ready - missing generated-sites repo', 'Configure RENDER_GENERATED_SITES_REPO_URL before Render can deploy ZIP source.');
+      return ready(deployment.deploymentId, baseUpdate, 'Hosting configuration required', 'The fallback hosting route is not configured. Contact Glondia support.');
     }
     if (!cfg.githubPublisherConfigured) {
-      return ready(deployment.deploymentId, baseUpdate, 'Ready - missing GitHub publisher token', `Configure ${cfg.missingGithubPublisher.join(', ')} before Render can deploy ZIP source.`);
+      return ready(deployment.deploymentId, baseUpdate, 'Hosting configuration required', 'The fallback source publisher is not configured. Contact Glondia support.');
     }
 
     let githubPublish;
+    await setStage('github_push', 'Publishing source to GitHub', 'publishing_source', `Publishing extracted source to GitHub branch ${branch}.`);
     if (useTemporaryRepo) {
       const tempRepo = await publishDirectoryToTemporaryRepo({
         directory: siteDir,
@@ -157,13 +284,17 @@ export async function run(input = {}, context = {}) {
       });
     }
     baseUpdate.generatedSite.githubPublish = githubPublish;
-    await addDeploymentLog(deployment.deploymentId, `Published ${githubPublish.published.length} files to GitHub.`, 'ok');
+    await logStage('github_push', `Published ${githubPublish.published.length} files to GitHub.`, 'ok', {
+      source: 'github',
+      branch,
+      repository: activeSourceRepo,
+    });
 
     if (!renderApiService.configured()) {
-      return ready(deployment.deploymentId, baseUpdate, 'Ready - missing Render credentials', `Configure ${cfg.missingRender.join(', ')} to start Render deployment.`);
+      return ready(deployment.deploymentId, baseUpdate, 'Hosting temporarily unavailable', 'Glondia could not start the fallback hosting route. Contact support.');
     }
 
-    await addDeploymentLog(deployment.deploymentId, 'Render configured — creating service and triggering deploy.', 'info');
+    await setStage('provider_pull', 'Hosting provider pulling source', 'queued', 'GitHub publish complete; creating the hosting service and requesting a fresh source pull.');
     // For shared-repo mode the dispatcher needs the root base; for a temporary
     // repo the site lives at the repo root so no root base is sent.
     const renderResult = await createAndTriggerRenderDeploy({
@@ -173,9 +304,10 @@ export async function run(input = {}, context = {}) {
       ...(useTemporaryRepo ? {} : { siteRootDir: rootBase }),
     });
     await addDeploymentLog(deployment.deploymentId, `Deploy ${renderResult.deployId} started.`, 'ok');
-    await addDeploymentLog(deployment.deploymentId, `Render service ${renderResult.serviceId} created and deploy ${renderResult.deployId} triggered.`, 'ok');
+    await addDeploymentLog(deployment.deploymentId, `Hosting deployment ${renderResult.deployId} started.`, 'ok', { internalProvider: 'render' });
     const updated = await updateDeploymentRecord(deployment.deploymentId, {
       ...baseUpdate,
+      provider: 'render',
       // Render handoff succeeded → this is a real, billable platform deployment.
       platformDeployed: true,
       status: 'building',
@@ -186,6 +318,8 @@ export async function run(input = {}, context = {}) {
       billingAttachStatus: 'queued',
       renderServiceId: renderResult.serviceId,
       renderDeployId: renderResult.deployId,
+      providerServiceId: renderResult.serviceId,
+      providerDeployId: renderResult.deployId,
       providerStatus: renderResult.providerStatus,
       liveUrl: renderResult.liveUrl,
       render: {
@@ -215,8 +349,27 @@ export async function run(input = {}, context = {}) {
 }
 
 export async function runFromBase64(input) {
-  const { deployZipSite } = await import('./base64ZipToRender.pipeline.js');
-  return deployZipSite(input);
+  const base64 = String(input?.fileBase64 || '').replace(/^data:.*?;base64,/, '');
+  if (!base64) {
+    const error = new Error('fileBase64 is required.');
+    error.status = 400;
+    error.stage = 'zip_upload';
+    throw error;
+  }
+  const buffer = Buffer.from(base64, 'base64');
+  return run({
+    file: {
+      originalname: input.fileName || 'uploaded-site.zip',
+      size: buffer.length,
+      buffer,
+    },
+    fields: {
+      ...input,
+      siteName: input.siteName || input.name,
+      serviceName: input.serviceName || input.siteName || input.name,
+    },
+    userId: input.userId,
+  }, { userId: input.userId || 'local-user' });
 }
 
 class ZipDeploymentPipelineService {
@@ -313,6 +466,8 @@ function stageToStep(stage) {
     zip_extract: 'ZIP extraction failed',
     project_detection: 'Project detection failed',
     github_push: 'GitHub publish failed',
+    vps_build: 'Hosting server build failed',
+    vps_publish: 'Hosting server publish failed',
     render_service_create: 'Render service creation failed',
     render_deploy_trigger: 'Render deploy trigger failed',
   }[stage] || 'Failed';

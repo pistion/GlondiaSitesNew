@@ -73,10 +73,6 @@ export function buildBillingRows(users = [], deployments = [], orders = [], rece
       .filter((o) => o.status === 'paid')
       .reduce((sum, o) => sum + (o.totalAmountCents || 0), 0);
 
-    const isPromo =
-      d.billingTierId === 'promo_50' ||
-      (user && !!user.promoClaimedAt && user.promoClaimedDeploymentId === d.deploymentId);
-
     return {
       deployment: d,
       user,
@@ -84,7 +80,6 @@ export function buildBillingRows(users = [], deployments = [], orders = [], rece
       latestReceipt,
       allOrders: depOrders,
       totalPaid,
-      isPromo,
       currency: latestOrder?.currency || d.priceCurrency || 'PGK',
     };
   });
@@ -104,11 +99,7 @@ export function buildHostingRows(users = [], deployments = [], orders = []) {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const latestOrder = depOrders[0] || null;
 
-    const isPromo =
-      d.billingTierId === 'promo_50' ||
-      (user && !!user.promoClaimedAt && user.promoClaimedDeploymentId === d.deploymentId);
-
-    return { deployment: d, user, latestOrder, isPromo };
+    return { deployment: d, user, latestOrder };
   });
 }
 
@@ -118,9 +109,8 @@ const STATUS_FILTERS = {
   pending: (d) => d.status === 'building' || d.status === 'pending',
   failed: (d) => d.status === 'failed',
   suspended: (d) => d.status === 'suspended' || d.status === 'overdue_suspended',
-  free: (d) => d.billingTierId === 'free' || d.renderPlan === 'free',
+  free: (d) => d.renderPlan === 'free',
   paid: (d) => d.paymentStatus === 'paid',
-  promo: (d) => d.billingTierId === 'promo_50',
   dns: (d) => {
     const s = String(d.status || '').toLowerCase();
     return s.includes('dns') || s.includes('domain');

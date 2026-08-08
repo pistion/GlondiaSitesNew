@@ -2,8 +2,8 @@
  * attachBilling.handler.js — BILLING_ATTACH.
  *
  * Durable replacement for the engine's process-local setImmediate billing
- * attach: creates/reuses the deployment order and trial subscription for a
- * builder deployment, only after the deployment is actually billable
+ * attach: registers a deployment with database-backed usage billing after the
+ * deployment is actually billable
  * (shouldAttachDeploymentBilling — the central billable predicate). Retries
  * transient failures; a restart re-runs from the job table.
  */
@@ -65,15 +65,14 @@ export async function run(ctx) {
     deployment,
     user: { id: userId || deployment.userId },
     kind: 'builder-revision',
-    billingTierId: null, // server-approved default tier; customers never pick provider plans
   });
 
   if (linkId) {
     await repo.updateDeploymentLink(linkId, {
-      metadata: { billing: 'attached', billingTierId: summary?.billingTierId || null },
+      metadata: { billing: summary?.status || 'metering', invoiceId: summary?.invoiceId || null },
     });
   }
-  return { attached: true, billingTierId: summary?.billingTierId || null };
+  return { attached: true, status: summary?.status || 'metering', invoiceId: summary?.invoiceId || null };
 }
 
 export async function onPermanentFailure(ctx) {

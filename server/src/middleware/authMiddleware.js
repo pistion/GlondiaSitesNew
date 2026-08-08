@@ -1,7 +1,5 @@
 import { verifyAccessToken, getUserAccountStatus } from '../services/authService.js';
 
-const isProd = process.env.NODE_ENV === 'production';
-
 // Account states that are denied access even with an otherwise-valid JWT.
 const BLOCKED_STATUSES = new Set(['disabled', 'deleted', 'suspended']);
 
@@ -9,7 +7,9 @@ const BLOCKED_STATUSES = new Set(['disabled', 'deleted', 'suspended']);
  * Authenticate a request from the `Authorization: Bearer <jwt>` header.
  *
  *  - A valid JWT sets req.user = { id, email, role, name }.
- *  - A present-but-invalid token is always rejected (401), even in dev.
+ *  - A present-but-invalid token is rejected (401), except in explicit
+ *    development/demo fallback mode where stale browser storage should not
+ *    block local testing.
  *  - When NO token is present:
  *      • In explicit development/demo mode we fall back to a local user so the
  *        app is usable without a backend session (honouring x-user-id headers).
@@ -25,6 +25,7 @@ export async function authMiddleware(req, res, next) {
     try {
       payload = verifyAccessToken(match[1]);
     } catch {
+      if (devFallbackAllowed()) return setDevFallbackUser(req, next);
       return reject(req, res);
     }
     req.user = {
@@ -46,13 +47,7 @@ export async function authMiddleware(req, res, next) {
   }
 
   if (devFallbackAllowed()) {
-    req.user = {
-      id: req.headers['x-user-id'] || req.headers['x-glondia-user-id'] || 'local-user',
-      role: req.headers['x-user-role'] || 'owner',
-      email: null,
-      name: null,
-    };
-    return next();
+    return setDevFallbackUser(req, next);
   }
 
   return reject(req, res);
@@ -60,7 +55,18 @@ export async function authMiddleware(req, res, next) {
 
 /** Dev/demo fallback is allowed only outside production and unless disabled. */
 function devFallbackAllowed() {
+  const isProd = process.env.NODE_ENV === 'production';
   return !isProd && String(process.env.AUTH_DEV_FALLBACK || 'true').toLowerCase() !== 'false';
+}
+
+function setDevFallbackUser(req, next) {
+  req.user = {
+    id: req.headers['x-user-id'] || req.headers['x-glondia-user-id'] || 'local-user',
+    role: req.headers['x-user-role'] || 'owner',
+    email: null,
+    name: null,
+  };
+  return next();
 }
 
 function reject(req, res) {

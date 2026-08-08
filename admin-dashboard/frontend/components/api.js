@@ -78,6 +78,17 @@
       role:      u.role || "member",
       status:    u.accountStatus || "active",
       planId:    u.planId || null,
+      clientId:  u.clientId || null,
+      phone:     u.phone || null,
+      profileDetails: u.profileDetails || {},
+      accountStatus: u.accountStatus || u.status || "active",
+      updatedAt: u.updatedAt || null,
+      disabledReason: u.disabledReason || null,
+      disabledAt: u.disabledAt || null,
+      deletedAt: u.deletedAt || null,
+      promoEligible: u.promoEligible,
+      promoSignupRank: u.promoSignupRank,
+      promoClaimedAt: u.promoClaimedAt || null,
       avatarUrl: u.avatarUrl || null,
       createdAt: u.createdAt || null,
     };
@@ -91,7 +102,7 @@
       userId:        d.userId || null,
       status:        d.status || "unknown",
       billingStatus: d.paymentStatus || "none",
-      plan:          d.billingTierLabel || d.billingTierId || d.renderPlan || null,
+      plan:          d.renderPlan || null,
       liveUrl:       d.liveUrl || null,
       renderPlan:    d.renderPlan || null,
       source:        d.source || null,
@@ -240,16 +251,35 @@
       return apiRequest("/api/admin/users")
         .then((d) => (Array.isArray(d) ? d : (d?.users || d?.items || [])).map(normalizeCustomer));
     },
+    getControlPlaneSection(section) {
+      return apiRequest("/api/admin/control-plane/" + encodeURIComponent(section));
+    },
     getCustomer(userId) {
-      return apiRequest("/api/admin/users/" + encodeURIComponent(userId))
-        .then((detail) => ({
-          ...detail,
-          user: normalizeCustomer(detail?.user || detail),
-          deployments: detail?.deployments || [],
-          orders: detail?.orders || [],
-          receipts: detail?.receipts || [],
-          totals: detail?.totals || {},
-        }));
+      const base = "/api/admin/customers/" + encodeURIComponent(userId);
+      return Promise.all([
+        apiRequest(base + "/overview"),
+        apiRequest(base + "/services?limit=100"),
+        apiRequest(base + "/billing?limit=100"),
+        apiRequest(base + "/operations?limit=100"),
+        apiRequest(base + "/activity?limit=100"),
+      ]).then(([overview, services, billing, operations, activity]) => ({
+        ...overview,
+        user: normalizeCustomer(overview.customer),
+        customer: overview.customer,
+        services: services.items || overview.services || [],
+        access: (services.items || []).filter((item) => item.accessId || item.accessStatus),
+        billing: {
+          orders: billing.orders?.items || overview.billing?.orders || [],
+          receipts: billing.receipts?.items || overview.billing?.receipts || [],
+          subscriptions: billing.subscriptions?.items || overview.billing?.subscriptions || [],
+          invoices: billing.invoices?.items || overview.billing?.invoices || [],
+          creditNotes: billing.creditNotes?.items || overview.billing?.creditNotes || [],
+          paymentMethods: billing.paymentMethods?.items || overview.billing?.paymentMethods || [],
+        },
+        operations,
+        activity: activity.audit?.items || overview.activity || [],
+        adminCommands: activity.adminCommands || overview.adminCommands || [],
+      }));
     },
     updateCustomer(userId, patch) {
       return apiRequest("/api/admin/users/" + encodeURIComponent(userId), { method: "PATCH", body: patch });

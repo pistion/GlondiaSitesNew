@@ -2,7 +2,7 @@ import { prisma } from '../services/db.js';
 
 export function listOverviewUsers() {
   return prisma.user.findMany({
-    select: { accountStatus: true, promoEligible: true, promoClaimedAt: true },
+    select: { accountStatus: true },
   });
 }
 
@@ -48,6 +48,15 @@ export function reactivateUser(userId) {
     disabledReason: null,
     disabledAt: null,
     deletedAt: null,
+  });
+}
+
+export function softDeleteUser(userId, reason) {
+  return updateUser(userId, {
+    accountStatus: 'deleted',
+    disabledAt: new Date(),
+    deletedAt: new Date(),
+    disabledReason: reason ? String(reason).slice(0, 1000) : 'account_deleted',
   });
 }
 

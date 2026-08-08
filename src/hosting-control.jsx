@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ICN } from './icons';
 import { Badge, Empty, StatusBadge, Tabs } from './components';
 import { uploadManualReceipt, createPaypalOrder, capturePaypalOrder } from './api/payments.js';
+import SandboxBanner from './features/sandbox/SandboxBanner.jsx';
 import {
   HOSTING_TABS,
   BillingSection,
@@ -14,8 +15,8 @@ import {
   HostingSettingsSection,
   MetricsSection,
   OverviewSection,
-  RulesSection,
   SecretFilesSection,
+  WebhooksSection,
 } from './features/hosting-management';
 
 // Glondia Hosting Hub owns live-site controls: logs, settings, env vars,
@@ -75,6 +76,7 @@ function isTemplateGenerated(app) { return getHostingSourceType(app) === 'templa
 function isRoxanneGenerated(app) { return getHostingSourceType(app) === 'roxanne-ai'; }
 function sourceLabel(app) { const t = getHostingSourceType(app); return t === 'zip-upload' ? 'ZIP Upload' : t === 'template' ? 'Template' : t === 'roxanne-ai' ? 'RoxanneAI generated' : t === 'github' ? 'GitHub import' : 'Builder'; }
 function sourceBadgeTone(app) { const t = getHostingSourceType(app); return t === 'zip-upload' || t === 'template' || t === 'roxanne-ai' ? 'info' : 'muted'; }
+function hostingPlanLabel(app) { return app?.hostingPlan === 'dedicated' || app?.provider === 'vultr' ? 'Dedicated Hosting' : 'Shared Hosting'; }
 function getRenderSourceRoot(app) { return app?.generatedSite?.sourceArtifact?.targetRoot || app?.generatedSite?.githubTargetRoot || app?.render?.githubPublish?.targetRoot || app?.environmentConfiguration?.rootDirectory || ''; }
 function hasRealRenderId(id) { return Boolean(id && !String(id).includes('_pending')); }
 
@@ -123,6 +125,8 @@ export function HostingList({ navigate }) {
         </div>
       </div>
 
+      <SandboxBanner service="hosting" />
+
       {prefillConfig && (
         <div className="card prefill-banner" style={{ padding: '18px 20px', marginBottom: 20, borderColor: 'var(--accent)', background: 'var(--accent-soft)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -152,7 +156,7 @@ export function HostingList({ navigate }) {
               className="btn btn-primary"
               onClick={() => navigate({ view: 'builder-import', params: { mode: 'github', prefill: prefillConfig } })}
             >
-              <ICN.Server size={14} /> Deploy to Render
+              <ICN.Server size={14} /> Deploy site
             </button>
             <a href={prefillConfig.repoUrl} target="_blank" rel="noreferrer" className="btn btn-outline">
               <ICN.Git size={14} /> View on GitHub
@@ -161,7 +165,7 @@ export function HostingList({ navigate }) {
         </div>
       )}
 
-      <Tabs value={tab} onChange={setTab} options={[{ value: 'apps', label: 'My apps' }, { value: 'settings', label: 'Settings' }]} />
+      <Tabs value={tab} onChange={setTab} options={[{ value: 'apps', label: 'My apps' }, { value: 'billing', label: 'Billing' }, { value: 'settings', label: 'Settings' }]} />
       {tab === 'apps' ? (
         <>
           {showDeployOptions && <HostingDeploySetup navigate={navigate} onClose={() => setShowDeployOptions(false)} />}
@@ -170,15 +174,19 @@ export function HostingList({ navigate }) {
             ? <div className="card" style={{ padding: '42px 24px' }}><Empty icon="Server" title="Loading hosting apps..." /></div>
             : apps.length === 0
               ? <div className="card" style={{ padding: '48px 24px' }}><Empty icon="Server" title="No hosted apps yet" body="Start a deploy above from GitHub, ZIP upload, or choose a template in Site builder." /></div>
-              : <div className="grid-2">{apps.map((app) => <HostingAppCard key={app.deploymentId || app.id} app={app} navigate={navigate} />)}</div>
+              : <div className="grid-2 hosting-app-grid">{apps.map((app) => <HostingAppCard key={app.deploymentId || app.id} app={app} navigate={navigate} />)}</div>
           }
         </>
+      ) : tab === 'billing' ? (
+        <BillingSection scope="hosting" app={{ billingPlanName: 'Professional' }} />
       ) : <HostingSettings />}
     </>
   );
 }
 
 function HostingDeploySetup({ navigate, onClose }) {
+  const [hostingTarget, setHostingTarget] = useState('');
+  const [dedicatedPlan, setDedicatedPlan] = useState(null);
   const go = (route) => {
     onClose?.();
     navigate(route);
@@ -189,14 +197,14 @@ function HostingDeploySetup({ navigate, onClose }) {
       title: 'Deploy from GitHub',
       body: 'Connect an existing repository, confirm build settings, then hand it to Hosting.',
       action: 'Start GitHub deploy',
-      onClick: () => go({ view: 'builder-import', params: { mode: 'github' } }),
+      onClick: () => go({ view: 'builder-import', params: { mode: 'github', hostingTarget, dedicatedPlan } }),
     },
     {
       icon: ICN.Box,
       title: 'Upload ZIP',
       body: 'Drop a deployable ZIP package, validate the source, then send it to Hosting.',
       action: 'Start ZIP upload',
-      onClick: () => go({ view: 'builder-import', params: { mode: 'zip' } }),
+      onClick: () => go({ view: 'builder-import', params: { mode: 'zip', hostingTarget, dedicatedPlan } }),
     },
     {
       icon: ICN.Layers,
@@ -207,38 +215,117 @@ function HostingDeploySetup({ navigate, onClose }) {
       secondary: true,
     },
   ];
+  const dedicatedPlans = [
+    { id: 'managed-essential', tierKey: 'starter', tierLabel: 'Essential', monthly_cost: 10, vcpu_count: 1, ram: 1024, disk: 25 },
+    { id: 'managed-performance', tierKey: 'balanced', tierLabel: 'Performance', monthly_cost: 30, vcpu_count: 2, ram: 4096, disk: 80 },
+    { id: 'managed-high-performance', tierKey: 'power', tierLabel: 'High performance', monthly_cost: 100, vcpu_count: 4, ram: 16384, disk: 320 },
+  ];
+  const sourceReady = hostingTarget === 'shared' || (hostingTarget === 'vultr' && dedicatedPlan);
 
   return (
     <div className="card hosting-deploy-setup">
       <button className="btn btn-icon btn-ghost hosting-deploy-close" onClick={onClose} aria-label="Close deploy options"><ICN.X size={16} /></button>
       <h3 style={{ marginTop: 0, marginBottom: 4 }}>Choose a deploy source</h3>
       <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
-        Select how this hosting deployment should start.
+        Choose where the app will run, then select its source.
       </p>
-      <div className="hosting-deploy-options">
-        {options.map((option) => {
-          const Icon = option.icon;
+      <div className="hosting-deploy-step-label"><span>1</span> Choose a hosting plan</div>
+      <div className="hosting-deploy-options" style={{ marginBottom: 18 }}>
+        {[
+          { id: 'shared', icon: ICN.Server, title: 'Shared Hosting', body: 'Recommended for most websites. Glondia manages deployment, SSL, logs, and availability.' },
+          { id: 'vultr', icon: ICN.Server, title: 'Dedicated Hosting', body: 'Private compute resources for demanding websites and web applications.' },
+        ].map((target) => {
+          const Icon = target.icon;
+          const selected = hostingTarget === target.id;
           return (
-            <button key={option.title} type="button" className="hosting-deploy-option" onClick={option.onClick}>
+            <button
+              key={target.id}
+              type="button"
+              className={`hosting-deploy-option${selected ? ' is-selected' : ''}`}
+              aria-pressed={selected}
+              onClick={() => { setHostingTarget(target.id); if (target.id !== 'vultr') setDedicatedPlan(null); }}
+            >
               <span className="hosting-deploy-option-icon"><Icon size={18} /></span>
-              <span style={{ flex: 1 }}>
-                <strong>{option.title}</strong>
-                <small>{option.body}</small>
-              </span>
+              <span style={{ flex: 1 }}><strong>{target.title}</strong><small>{target.body}</small></span>
+              {selected && <ICN.CheckCircle size={17} style={{ color: 'var(--accent)' }} />}
             </button>
           );
         })}
       </div>
+      {hostingTarget === 'vultr' && (
+        <div className="hosting-dedicated-plans">
+          <div className="hosting-deploy-step-label"><span>2</span> Choose server performance</div>
+          <div className="hosting-dedicated-plan-grid">
+            {dedicatedPlans.map((plan) => {
+              const selected = dedicatedPlan?.id === plan.id;
+              return <button key={plan.id} type="button" className={`hosting-dedicated-plan${selected ? ' is-selected' : ''}`} onClick={() => setDedicatedPlan(plan)}>
+                <span className="eyebrow">{plan.tierLabel}</span>
+                <strong>${plan.monthly_cost}<small>/month estimated</small></strong>
+                <span>{plan.vcpu_count} vCPU · {plan.ram / 1024} GB RAM · {plan.disk} GB SSD</span>
+                {selected && <ICN.CheckCircle size={17} />}
+              </button>;
+            })}
+          </div>
+        </div>
+      )}
+      {sourceReady ? (
+        <div className="hosting-deploy-source-step">
+          <div className="hosting-deploy-step-label"><span>{hostingTarget === 'vultr' ? '3' : '2'}</span> Choose how to add the website</div>
+          <div className="hosting-deploy-options">
+            {options.map((option) => {
+              const Icon = option.icon;
+              return (
+                <button key={option.title} type="button" className="hosting-deploy-option" onClick={option.onClick}>
+                  <span className="hosting-deploy-option-icon"><Icon size={18} /></span>
+                  <span style={{ flex: 1 }}>
+                    <strong>{option.title}</strong>
+                    <small>{option.body}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <div className="hosting-deploy-source-placeholder">
+          {hostingTarget === 'vultr' ? 'Choose a server performance level to continue.' : 'Select a hosting plan to continue to GitHub, ZIP upload, or templates.'}
+        </div>
+      )}
     </div>
   );
 }
 
 function HostingAppCard({ app, navigate }) {
   const src = sourceLabel(app); const building = ['preparing', 'queued', 'building', 'deploying', 'verifying'].includes(app.status);
-  return <button type="button" className="card" onClick={() => navigate({ view: 'hosting-detail', params: { id: app.deploymentId || app.id } })} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 14, color: 'inherit' }}><div className="row between"><div className="row" style={{ gap: 12, minWidth: 0 }}><span className="proj-thumb" style={{ width: 40, height: 40, fontSize: 15 }}>{(app.serviceName || app.siteName || 'A')[0]}</span><div style={{ minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{app.serviceName || app.siteName}</div><div className="mono faint" style={{ fontSize: 12 }}>{src}</div></div></div><StatusBadge value={statusLabel(app.status)} /></div><Badge tone={sourceBadgeTone(app)} dot={false}>{src}</Badge>{building && <DeploymentPulse compact />}<div className="kv" style={{ gridTemplateColumns: '110px 1fr', gap: '6px 14px' }}><dt>Step</dt><dd>{app.currentStep || statusLabel(app.status)}</dd><dt>Build</dt><dd className="mono">{app.buildStatus || 'pending'}</dd><dt>Live URL</dt><dd className="mono">{app.liveUrl ? app.liveUrl.replace(/^https?:\/\//, '') : 'Pending'}</dd><dt>Source</dt><dd className="mono">{src}</dd></div><div className="row" style={{ gap: 8 }}>{app.liveUrl && <a className="btn btn-sm btn-outline" href={app.liveUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}><ICN.ExternalLink size={13} /> View Live Site</a>}<span className="btn btn-sm btn-primary">Manage</span></div></button>;
+  return <button type="button" className="card" onClick={() => navigate({ view: 'hosting-detail', params: { id: app.deploymentId || app.id } })} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 14, color: 'inherit' }}><div className="row between"><div className="row" style={{ gap: 12, minWidth: 0 }}><span className="proj-thumb" style={{ width: 40, height: 40, fontSize: 15 }}>{(app.serviceName || app.siteName || 'A')[0]}</span><div style={{ minWidth: 0 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{app.serviceName || app.siteName}</div><div className="mono faint" style={{ fontSize: 12 }}>{src}</div></div></div><StatusBadge value={statusLabel(app.status)} /></div><div className="row" style={{ gap: 6 }}><Badge tone={sourceBadgeTone(app)} dot={false}>{src}</Badge><Badge tone="muted" dot={false}>{hostingPlanLabel(app)}</Badge></div>{building && <DeploymentPulse compact />}<div className="kv" style={{ gridTemplateColumns: '110px 1fr', gap: '6px 14px' }}><dt>Step</dt><dd>{app.currentStep || statusLabel(app.status)}</dd><dt>Build</dt><dd className="mono">{app.buildStatus || 'pending'}</dd><dt>Live URL</dt><dd className="mono">{app.liveUrl ? app.liveUrl.replace(/^https?:\/\//, '') : 'Pending'}</dd><dt>Plan</dt><dd>{hostingPlanLabel(app)}</dd><dt>Source</dt><dd className="mono">{src}</dd></div><div className="row" style={{ gap: 8 }}>{app.liveUrl && <a className="btn btn-sm btn-outline" href={app.liveUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}><ICN.ExternalLink size={13} /> View Live Site</a>}<span className="btn btn-sm btn-primary">Manage</span></div></button>;
 }
 
 const TAB_OPTIONS = HOSTING_TABS;
+const REDEPLOY_DELAY_MS = 20 * 60 * 1000;
+
+function redeployNoticeStorageKey(deploymentId) {
+  return `glondia:hosting:${deploymentId}:pending-redeploy`;
+}
+
+function readRedeployNotice(deploymentId) {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(redeployNoticeStorageKey(deploymentId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRedeployNotice(deploymentId, notice) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(redeployNoticeStorageKey(deploymentId), JSON.stringify(notice));
+}
+
+function clearRedeployNotice(deploymentId) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(redeployNoticeStorageKey(deploymentId));
+}
 
 export function HostingDetail({ id, navigate }) {
   const deploymentId = id;
@@ -247,7 +334,12 @@ export function HostingDetail({ id, navigate }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [copiedUrl, setCopiedUrl] = useState(false);
   const [tab, setTab] = useState('Overview');
+  const [redeployNotice, setRedeployNotice] = useState(() => readRedeployNotice(deploymentId));
+  const [showRedeployPopup, setShowRedeployPopup] = useState(false);
+  const copyTimerRef = useRef(null);
+  const redeployTimerRef = useRef(null);
 
   const load = useCallback(async () => {
     const [hosting, nextStatus] = await Promise.all([
@@ -266,6 +358,34 @@ export function HostingDetail({ id, navigate }) {
     return () => { cancelled = true; clearInterval(interval); };
   }, [deploymentId, load]);
 
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    setRedeployNotice(readRedeployNotice(deploymentId));
+    setShowRedeployPopup(false);
+  }, [deploymentId]);
+
+  useEffect(() => {
+    if (redeployTimerRef.current) clearTimeout(redeployTimerRef.current);
+    if (!redeployNotice?.scheduledFor || redeployNotice.status !== 'pending') return undefined;
+    const waitMs = Math.max(0, new Date(redeployNotice.scheduledFor).getTime() - Date.now());
+    redeployTimerRef.current = setTimeout(() => {
+      runAction('redeploy', () => redeployRenderDeployment(deploymentId, { reason: 'scheduled_settings_change', changes: redeployNotice.changes || [] }))
+        .then((ok) => {
+          if (ok) {
+            clearRedeployNotice(deploymentId);
+            setRedeployNotice(null);
+            setShowRedeployPopup(false);
+          }
+        });
+    }, waitMs);
+    return () => {
+      if (redeployTimerRef.current) clearTimeout(redeployTimerRef.current);
+    };
+  }, [deploymentId, redeployNotice]);
+
   const merged = useMemo(() => ({ ...(app || {}), ...(status || {}) }), [app, status]);
   const isRemoved = merged.status === 'deleted';
   const isBuilding = ['preparing', 'queued', 'building'].includes(merged.status);
@@ -275,8 +395,8 @@ export function HostingDetail({ id, navigate }) {
 
   const runAction = async (name, fn) => {
     setBusy(name); setError('');
-    try { await fn(); await load(); }
-    catch (err) { setError(err.message || 'Action failed.'); }
+    try { await fn(); await load(); return true; }
+    catch (err) { setError(err.message || 'Action failed.'); return false; }
     finally { setBusy(''); }
   };
 
@@ -286,6 +406,40 @@ export function HostingDetail({ id, navigate }) {
       await deleteHostingDeployment(deploymentId);
       navigate({ view: 'hosting-list' });
     });
+  };
+
+  const handleCopyUrl = async () => {
+    if (!merged.liveUrl) return;
+    await navigator.clipboard?.writeText(merged.liveUrl);
+    setCopiedUrl(true);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopiedUrl(false), 1600);
+  };
+
+  const flagRedeployNeeded = (changeLabel) => {
+    const existing = readRedeployNotice(deploymentId);
+    const createdAt = existing?.createdAt || new Date().toISOString();
+    const scheduledFor = existing?.scheduledFor || new Date(Date.now() + REDEPLOY_DELAY_MS).toISOString();
+    const changes = Array.from(new Set([...(existing?.changes || []), changeLabel].filter(Boolean)));
+    const next = {
+      status: 'pending',
+      createdAt,
+      scheduledFor,
+      changes,
+      updatedAt: new Date().toISOString(),
+    };
+    writeRedeployNotice(deploymentId, next);
+    setRedeployNotice(next);
+    setShowRedeployPopup(true);
+  };
+
+  const handleRedeployNow = async () => {
+    const ok = await runAction('redeploy', () => redeployRenderDeployment(deploymentId, { reason: 'manual_pending_settings', changes: redeployNotice?.changes || [] }));
+    if (ok) {
+      clearRedeployNotice(deploymentId);
+      setRedeployNotice(null);
+      setShowRedeployPopup(false);
+    }
   };
 
   if (loading) return <div className="card" style={{ padding: 42 }}><Empty icon="Server" title="Loading hosting app..." /></div>;
@@ -310,58 +464,155 @@ export function HostingDetail({ id, navigate }) {
           </div>
         </div>
       </div>
-      <div className="actions">
-        {merged.liveUrl && <a className="btn btn-outline" href={merged.liveUrl} target="_blank" rel="noopener noreferrer"><ICN.ExternalLink size={14} /> View Live Site</a>}
-        {merged.liveUrl && <button className="btn btn-outline" onClick={() => navigator.clipboard?.writeText(merged.liveUrl)}><ICN.Copy size={14} /> Copy URL</button>}
-        <button className="btn btn-outline" disabled={!!busy || isRemoved || !real} onClick={() => runAction('sync', () => syncHostingDeployment(deploymentId))}><ICN.Refresh size={14} /> Sync</button>
-        <button className="btn btn-primary" disabled={!!busy || isRemoved} onClick={() => runAction('redeploy', () => redeployRenderDeployment(deploymentId))}><ICN.Refresh size={14} /> Redeploy</button>
-      </div>
-    </div>
-    {error && <div className="card" style={{ padding: '10px 14px', color: 'var(--danger)', fontSize: 13 }}>{error}</div>}
-    <div className="grid-side">
-      <DeploymentStatusPanel app={merged} onVerify={() => runAction('verify', () => verifyRenderDeploymentUrl(deploymentId))} busy={busy} />
-      <AdminPanel
-        app={merged}
-        busy={busy}
-        real={real}
-        isSuspended={isSuspended}
-        isBuilding={isBuilding}
-        isWebService={isWebService}
-        isRemoved={isRemoved}
-        onSuspend={() => window.confirm('Suspend this site?') && runAction('suspend', () => suspendHostingDeployment(deploymentId))}
-        onResume={() => runAction('resume', () => resumeHostingDeployment(deploymentId))}
-        onRestart={() => window.confirm('Restart this service? It will briefly go offline.') && runAction('restart', () => restartHostingDeployment(deploymentId))}
-        onCancel={() => window.confirm('Cancel the current deploy?') && runAction('cancel', () => cancelHostingDeploy(deploymentId))}
-        onDelete={handleDelete}
-      />
     </div>
     <div className="hosting-tabs-wrap">
       <Tabs value={tab} onChange={setTab} options={TAB_OPTIONS} />
       <label className="hosting-tab-select">
         <span className="label">Section</span>
         <select className="select" value={tab} onChange={(event) => setTab(event.target.value)}>
-          {TAB_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+          {TAB_OPTIONS.map((option) => {
+            const value = typeof option === 'string' ? option : option.value;
+            const label = typeof option === 'string' ? option : option.label;
+            return <option key={value} value={value}>{label}</option>;
+          })}
         </select>
       </label>
     </div>
-    {tab === 'Overview' && <OverviewSection app={merged} deploymentId={deploymentId} />}
-    {tab === 'Deploy History' && <DeployHistorySection app={merged} deploymentId={deploymentId} busy={busy} onRollback={(deployId) => window.confirm(`Roll back to deploy ${deployId.slice(0, 8)}?`) && runAction('rollback', () => rollbackHostingDeploy(deploymentId, deployId))} />}
-    {tab === 'Build Logs' && <BuildLogsSection deploymentId={deploymentId} />}
-    {tab === 'Metrics' && <MetricsSection deploymentId={deploymentId} />}
-    {tab === 'Hosting Settings' && <HostingSettingsSection app={merged} deploymentId={deploymentId} onReload={load} isStatic={merged.serviceType !== 'web_service'} onPurgeCache={() => runAction('purgeCache', () => purgeHostingCache(deploymentId))} busy={busy} />}
-    {tab === 'Env Vars' && <EnvVarsSection deploymentId={deploymentId} />}
-    {tab === 'Secret Files' && <SecretFilesSection deploymentId={deploymentId} />}
-    {tab === 'Headers' && <HeadersSection deploymentId={deploymentId} />}
-    {tab === 'Rules' && <RulesSection deploymentId={deploymentId} />}
-    {tab === 'Disks' && <DisksSection app={merged} deploymentId={deploymentId} />}
-    {tab === 'Domains' && <DomainsSection app={merged} deploymentId={deploymentId} />}
-    {tab === 'Billing' && <BillingSection deploymentId={deploymentId} app={merged} onReload={load} />}
+    <SandboxBanner service="hosting" />
+    {redeployNotice && !showRedeployPopup && (
+      <PendingRedeployBanner notice={redeployNotice} onOpen={() => setShowRedeployPopup(true)} onRedeployNow={handleRedeployNow} busy={busy === 'redeploy'} />
+    )}
+    {showRedeployPopup && redeployNotice && (
+      <PendingRedeployPopup notice={redeployNotice} onClose={() => setShowRedeployPopup(false)} onRedeployNow={handleRedeployNow} busy={busy === 'redeploy'} />
+    )}
+    {error && <div className="card" style={{ padding: '10px 14px', color: 'var(--danger)', fontSize: 13 }}>{error}</div>}
+    <div key={tab} className="hosting-tab-panel-animate">
+      {tab === 'Overview' && (
+        <div className="hosting-overview-stack">
+          <DeploymentStatusPanel
+            app={merged}
+            onVerify={() => runAction('verify', () => verifyRenderDeploymentUrl(deploymentId))}
+            busy={busy}
+            controls={<AdminPanel app={merged} real={real} />}
+            actions={<HostingOverviewActions
+              app={merged}
+              busy={busy}
+              copiedUrl={copiedUrl}
+              isRemoved={isRemoved}
+              isSuspended={isSuspended}
+              real={real}
+              onCopyUrl={handleCopyUrl}
+              onRedeploy={() => runAction('redeploy', () => redeployRenderDeployment(deploymentId))}
+              onSuspend={() => window.confirm('Suspend this site?') && runAction('suspend', () => suspendHostingDeployment(deploymentId))}
+              onResume={() => runAction('resume', () => resumeHostingDeployment(deploymentId))}
+              onDelete={handleDelete}
+            />}
+          />
+          <OverviewSection app={merged} deploymentId={deploymentId} />
+        </div>
+      )}
+      {tab === 'Deploy History' && <DeployHistorySection app={merged} deploymentId={deploymentId} busy={busy} onRollback={(deployId) => window.confirm(`Roll back to deploy ${deployId.slice(0, 8)}?`) && runAction('rollback', () => rollbackHostingDeploy(deploymentId, deployId))} />}
+      {tab === 'Build Logs' && <BuildLogsSection deploymentId={deploymentId} />}
+      {tab === 'Metrics' && <MetricsSection deploymentId={deploymentId} />}
+      {tab === 'Hosting Settings' && <HostingSettingsSection app={merged} deploymentId={deploymentId} onReload={load} isStatic={merged.serviceType !== 'web_service'} onPurgeCache={() => runAction('purgeCache', () => purgeHostingCache(deploymentId))} busy={busy} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Env Vars' && <EnvVarsSection deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Secret Files' && <SecretFilesSection deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Headers' && <HeadersSection deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Webhooks' && <WebhooksSection deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Disks' && <DisksSection app={merged} deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Domains' && <DomainsSection app={merged} deploymentId={deploymentId} onNeedsRedeploy={flagRedeployNeeded} />}
+      {tab === 'Billing' && <BillingSection deploymentId={deploymentId} app={merged} onReload={load} scope="website" />}
+    </div>
   </>;
 }
 
-function DeploymentStatusPanel({ app, onVerify, busy }) {
+function DeploymentStatusPanel({ app, onVerify, busy, controls, actions }) {
   const hasService = hasRealRenderId(app.renderServiceId); const hasDeploy = hasRealRenderId(app.renderDeployId); const renderAttempted = Boolean(app.render?.attempted || hasService || hasDeploy); const renderPending = !renderAttempted && (String(app.renderServiceId || '').includes('_pending') || app.render?.skippedReason); const shouldAnimate = ['preparing', 'queued', 'building', 'deploying', 'verifying'].includes(app.status) && !renderPending;
-  return <div className="card"><div className="row between"><div><div className="page-eyebrow" style={{ marginBottom: 6 }}>{sourceLabel(app)} deployment status</div><h2 style={{ margin: 0 }}>{statusLabel(app.status)}</h2></div><StatusBadge value={statusLabel(app.status)} /></div>{(isZipUpload(app) || isTemplateGenerated(app) || isRoxanneGenerated(app)) && <SourcePackageBlock app={app} />}{renderAttempted && <RenderStartedBlock app={app} />}{!renderAttempted && renderPending && <RenderNotStartedBlock app={app} />}{shouldAnimate && <DeploymentPulse />}{app.status === 'failed' && <FailureBlock app={app} />}{app.status === 'live' && <SuccessBlock app={app} />}{app.status === 'deployed_unverified' && <WarmingBlock app={app} />}<div className="kv" style={{ marginTop: 16, gridTemplateColumns: '150px 1fr' }}><dt>Current step</dt><dd>{app.currentStep || statusLabel(app.status)}</dd><dt>Build status</dt><dd className="mono">{app.buildStatus || 'pending'}</dd><dt>Deploy handoff</dt><dd>{renderAttempted ? 'Started' : renderPending ? 'Waiting for configuration' : 'Ready'}</dd><dt>URL verification</dt><dd>{app.urlReachable ? 'Reachable' : app.liveUrl ? 'Warming up' : 'Pending URL'}</dd></div>{app.liveUrl && !app.urlReachable && <button className="btn btn-sm btn-outline" style={{ marginTop: 14 }} onClick={onVerify} disabled={busy === 'verify'}><ICN.Refresh size={13} /> Retry URL verification</button>}</div>;
+  return <div className="card"><div className="row between hosting-deployment-status-head"><div><div className="page-eyebrow" style={{ marginBottom: 6 }}>{sourceLabel(app)} deployment status</div><h2 style={{ margin: 0 }}>{statusLabel(app.status)}</h2></div><div className="hosting-deployment-status-actions"><StatusBadge value={statusLabel(app.status)} />{actions}</div></div>{(isZipUpload(app) || isTemplateGenerated(app) || isRoxanneGenerated(app)) && <SourcePackageBlock app={app} />}{renderAttempted && <RenderStartedBlock app={app} />}{!renderAttempted && renderPending && <RenderNotStartedBlock app={app} />}{shouldAnimate && <DeploymentPulse />}{app.status === 'failed' && <FailureBlock app={app} />}{app.status === 'live' && <SuccessBlock app={app} />}{app.status === 'deployed_unverified' && <WarmingBlock app={app} />}<div className="kv" style={{ marginTop: 16, gridTemplateColumns: '150px 1fr' }}><dt>Current step</dt><dd>{app.currentStep || statusLabel(app.status)}</dd><dt>Build status</dt><dd className="mono">{app.buildStatus || 'pending'}</dd><dt>Deploy handoff</dt><dd>{renderAttempted ? 'Started' : renderPending ? 'Waiting for configuration' : 'Ready'}</dd><dt>URL verification</dt><dd>{app.urlReachable ? 'Reachable' : app.liveUrl ? 'Warming up' : 'Pending URL'}</dd></div>{app.liveUrl && !app.urlReachable && <button className="btn btn-sm btn-outline" style={{ marginTop: 14 }} onClick={onVerify} disabled={busy === 'verify'}><ICN.Refresh size={13} /> Retry URL verification</button>}{controls}</div>;
+}
+
+function HostingOverviewActions({ app, busy, copiedUrl, isRemoved, isSuspended, real, onCopyUrl, onRedeploy, onSuspend, onResume, onDelete }) {
+  return (
+      <div className="actions hosting-live-actions" aria-label="Hosting actions">
+        {app.liveUrl && (
+          <a className="btn btn-icon btn-outline hosting-action-icon" href={app.liveUrl} target="_blank" rel="noopener noreferrer" aria-label="View Live Site" data-tooltip="View Live Site">
+            <ICN.ExternalLink size={15} />
+          </a>
+        )}
+        {app.liveUrl && (
+          <button className="btn btn-icon btn-outline hosting-action-icon" onClick={onCopyUrl} aria-label={copiedUrl ? 'Copied URL' : 'Copy URL'} data-tooltip={copiedUrl ? 'Copied' : 'Copy URL'}>
+            {copiedUrl ? <ICN.Check size={15} /> : <ICN.Copy size={15} />}
+          </button>
+        )}
+        <button className="btn btn-icon btn-outline hosting-action-icon" disabled={!!busy || isRemoved} onClick={onRedeploy} aria-label="Redeploy" data-tooltip={busy === 'redeploy' ? 'Redeploying' : 'Redeploy'}>
+          <ICN.Refresh size={15} />
+        </button>
+        {!isSuspended && (
+          <button className="btn btn-icon btn-outline hosting-action-icon" disabled={!real || !!busy || isRemoved} onClick={onSuspend} aria-label="Suspend Site" data-tooltip={busy === 'suspend' ? 'Suspending' : 'Suspend Site'}>
+            <ICN.Power size={15} />
+          </button>
+        )}
+        {isSuspended && (
+          <button className="btn btn-icon btn-outline hosting-action-icon" disabled={!real || !!busy || isRemoved} onClick={onResume} aria-label="Resume Site" data-tooltip={busy === 'resume' ? 'Resuming' : 'Resume Site'}>
+            <ICN.Play size={15} />
+          </button>
+        )}
+        <button className="btn btn-icon btn-outline hosting-action-icon hosting-action-icon--danger" disabled={!!busy} onClick={onDelete} aria-label="Delete Site" data-tooltip={busy === 'delete' ? 'Deleting' : 'Delete Site'}>
+          <ICN.Trash size={15} />
+        </button>
+      </div>
+  );
+}
+
+function PendingRedeployBanner({ notice, onOpen, onRedeployNow, busy }) {
+  return (
+    <div className="hosting-redeploy-banner">
+      <div>
+        <strong>Redeploy pending</strong>
+        <span>Saved changes will apply on redeploy. Auto redeploy is scheduled for {formatScheduleTime(notice.scheduledFor)}.</span>
+      </div>
+      <div className="hosting-redeploy-actions">
+        <button className="btn btn-sm btn-outline" onClick={onOpen}>View changes</button>
+        <button className="btn btn-sm btn-outline" disabled={busy} onClick={onRedeployNow}>{busy ? 'Redeploying...' : 'Redeploy now'}</button>
+      </div>
+    </div>
+  );
+}
+
+function PendingRedeployPopup({ notice, onClose, onRedeployNow, busy }) {
+  const changes = Array.isArray(notice.changes) && notice.changes.length ? notice.changes : ['Saved hosting settings'];
+  return (
+    <div className="hosting-redeploy-modal-backdrop" role="presentation">
+      <div className="hosting-redeploy-modal" role="dialog" aria-modal="true" aria-labelledby="hosting-redeploy-title">
+        <div className="hosting-redeploy-icon"><ICN.Refresh size={20} /></div>
+        <div>
+          <div className="page-eyebrow" style={{ marginBottom: 6 }}>Redeploy scheduled</div>
+          <h2 id="hosting-redeploy-title">Your changes were saved</h2>
+          <p>
+            These settings are stored now. To make them active on the live site, Glondia will run one scheduled redeploy in the next 20 minutes unless you redeploy manually.
+          </p>
+          <div className="hosting-redeploy-summary">
+            <span>Scheduled for</span>
+            <strong>{formatScheduleTime(notice.scheduledFor)}</strong>
+          </div>
+          <div className="hosting-redeploy-changes">
+            {changes.map((change) => <span key={change}>{change}</span>)}
+          </div>
+          <div className="hosting-redeploy-modal-actions">
+            <button className="btn btn-outline" disabled={busy} onClick={onClose}>Keep scheduled</button>
+            <button className="btn btn-outline" disabled={busy} onClick={onRedeployNow}>{busy ? 'Redeploying...' : 'Redeploy now'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatScheduleTime(value) {
+  if (!value) return 'soon';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'soon';
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 function SourcePackageBlock({ app }) { const g = app.generatedSite || {}; const root = getRenderSourceRoot(app); const repo = app.environmentConfiguration?.sourceRepository || g.sourceRepository || ''; return <div style={{ marginTop: 18, padding: 14, border: '1px solid var(--accent)', borderRadius: 'var(--r-sm)', background: 'var(--accent-soft)' }}><div className="row" style={{ gap: 8, color: 'var(--accent)', fontWeight: 700 }}><ICN.CheckCircle size={16} /> {isZipUpload(app) ? 'ZIP source package prepared' : 'Generated Vite React site prepared'}</div><div className="kv" style={{ marginTop: 10, gridTemplateColumns: '155px 1fr', fontSize: 12.5 }}>{g.uploadedFileName && <><dt>Uploaded file</dt><dd className="mono">{g.uploadedFileName}</dd></>}<dt>Deployable files</dt><dd>{Array.isArray(g.files) ? g.files.length : 0}</dd>{Array.isArray(g.ignoredFiles) && <><dt>Ignored files</dt><dd>{g.ignoredFiles.length}</dd></>}<dt>Framework</dt><dd className="mono">{g.framework || g.projectType || 'vite-react'}</dd>{repo && <><dt>Source repository</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{repo}</dd></>}{root && <><dt>Source root directory</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{root}</dd></>}{g.siteDir && <><dt>Internal storage path</dt><dd className="mono" style={{ wordBreak: 'break-all', opacity: 0.7 }}>{g.siteDir}</dd></>}</div></div>; }
@@ -372,8 +623,8 @@ function SuccessBlock({ app }) { return <div style={{ marginTop: 18, padding: 14
 function WarmingBlock({ app }) { return <div style={{ marginTop: 18, padding: 14, border: '1px solid var(--warning)', borderRadius: 'var(--r-sm)', background: 'var(--bg-deep)' }}><div className="row" style={{ gap: 8, color: 'var(--warning)', fontWeight: 700 }}><ICN.Refresh size={16} /> Deployed, still warming up</div><div className="mono" style={{ marginTop: 8, wordBreak: 'break-all' }}>{app.liveUrl || 'URL pending'}</div></div>; }
 function FailureBlock({ app }) { return <div style={{ marginTop: 18, padding: 14, border: '1px solid var(--danger)', borderRadius: 'var(--r-sm)', background: 'var(--bg-deep)' }}><div className="row" style={{ gap: 8, color: 'var(--danger)', fontWeight: 700 }}><ICN.AlertCircle size={16} /> Deployment failed</div><div className="muted" style={{ marginTop: 8 }}>{app.errorMessage || 'Review logs and settings, then redeploy.'}</div></div>; }
 
-function AdminPanel({ app, busy, real, isSuspended, isBuilding, isWebService, isRemoved, onSuspend, onResume, onRestart, onCancel, onDelete }) {
-  return <div className="card">
+function AdminPanel({ app, real }) {
+  return <div className="hosting-service-controls">
     <h2 style={{ marginTop: 0 }}>Service controls</h2>
     <div className="kv" style={{ gridTemplateColumns: '140px 1fr', marginBottom: 16 }}>
       <dt>Deployment ID</dt><dd className="mono">{app.deploymentId}</dd>
@@ -381,36 +632,6 @@ function AdminPanel({ app, busy, real, isSuspended, isBuilding, isWebService, is
       <dt>Deploy</dt><dd className="mono">{hasRealRenderId(app.renderDeployId) ? app.renderDeployId : 'Pending'}</dd>
       <dt>Last synced</dt><dd>{formatDate(app.lastRenderSyncedAt)}</dd>
       <dt>Created</dt><dd>{formatDate(app.createdAt)}</dd>
-    </div>
-    <div style={{ display: 'grid', gap: 8 }}>
-      {!isSuspended && (
-        <button className="btn btn-outline" disabled={!real || !!busy || isRemoved} onClick={onSuspend}>
-          <ICN.Power size={14} /> {busy === 'suspend' ? 'Suspending...' : 'Suspend Site'}
-        </button>
-      )}
-      {isSuspended && (
-        <button className="btn btn-outline" disabled={!real || !!busy || isRemoved} onClick={onResume}>
-          <ICN.Play size={14} /> {busy === 'resume' ? 'Resuming...' : 'Resume Site'}
-        </button>
-      )}
-      {isWebService && (
-        <button className="btn btn-outline" disabled={!real || !!busy || isRemoved || isSuspended} onClick={onRestart}>
-          <ICN.Refresh size={14} /> {busy === 'restart' ? 'Restarting...' : 'Restart Service'}
-        </button>
-      )}
-      {isBuilding && (
-        <button className="btn btn-outline" disabled={!real || !!busy} onClick={onCancel}>
-          <ICN.X size={14} /> {busy === 'cancel' ? 'Cancelling...' : 'Cancel Deploy'}
-        </button>
-      )}
-      <button
-        className="btn btn-outline"
-        style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
-        disabled={!!busy}
-        onClick={onDelete}
-      >
-        <ICN.Trash size={14} /> {busy === 'delete' ? 'Deleting...' : 'Delete Site'}
-      </button>
     </div>
   </div>;
 }
@@ -617,7 +838,7 @@ function SecretFilesTab({ deploymentId }) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
 
   const addRow = () => setFiles((prev) => [...prev, { name: '', value: '', id: `new_${Date.now()}` }]);
   const removeRow = (idx) => setFiles((prev) => prev.filter((_, i) => i !== idx));
@@ -682,7 +903,7 @@ function HeadersTab({ deploymentId }) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
 
   const addRow = () => setHeaders((prev) => [...prev, { path: '/*', name: '', value: '', id: `new_${Date.now()}` }]);
   const removeRow = (idx) => setHeaders((prev) => prev.filter((_, i) => i !== idx));
@@ -752,7 +973,7 @@ function RulesTab({ deploymentId }) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
 
   const addRow = () => setRoutes((prev) => [...prev, { type: 'redirect', source: '', destination: '', id: `new_${Date.now()}` }]);
   const removeRow = (idx) => setRoutes((prev) => prev.filter((_, i) => i !== idx));
@@ -1021,7 +1242,7 @@ function RenderSettingsTab({ app, deploymentId, onReload, isStatic: isStaticProp
 function EnvVarsTab({ deploymentId }) {
   const [items, setItems] = useState([]); const [form, setForm] = useState({ key: '', value: '' }); const [msg, setMsg] = useState('');
   const load = () => listHostingEnvVars(deploymentId).then(setItems).catch((e) => setMsg(e.message));
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
   const add = async () => { await upsertHostingEnvVar(deploymentId, form); setForm({ key: '', value: '' }); load(); };
   return <div className="card"><h2 style={{ marginTop: 0 }}>Environment variables</h2><div className="input-group"><input className="input mono" placeholder="KEY" value={form.key} onChange={(e) => setForm((f) => ({ ...f, key: e.target.value }))} /><input className="input mono" placeholder="value" value={form.value} onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))} /><button className="btn btn-primary" onClick={add}>Add</button><button className="btn btn-outline" onClick={() => syncHostingEnvVars(deploymentId).then(load)}>Sync</button></div>{msg && <p className="muted">{msg}</p>}<div className="kv" style={{ marginTop: 14 }}>{items.map((v) => <React.Fragment key={v.key}><dt className="mono">{v.key}</dt><dd><span className="mono">{v.valuePreview || 'hidden'}</span></dd></React.Fragment>)}</div></div>;
 }
@@ -1029,7 +1250,7 @@ function EnvVarsTab({ deploymentId }) {
 function DisksTab({ app, deploymentId }) {
   const [items, setItems] = useState([]); const [form, setForm] = useState({ name: '', mountPath: '/data', sizeGB: 1 });
   const load = () => listHostingDisks(deploymentId).then(setItems).catch(() => setItems([]));
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
   const add = async () => { await attachHostingDisk(deploymentId, form); load(); };
   return <div className="card"><h2 style={{ marginTop: 0 }}>Persistent disks</h2>{app.serviceType !== 'web_service' && <p className="muted">Disks are only available for web services.</p>}<div className="input-group"><input className="input" placeholder="disk name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /><input className="input mono" placeholder="/data" value={form.mountPath} onChange={(e) => setForm((f) => ({ ...f, mountPath: e.target.value }))} /><input className="input mono" type="number" value={form.sizeGB} onChange={(e) => setForm((f) => ({ ...f, sizeGB: e.target.value }))} /><button className="btn btn-primary" disabled={app.serviceType !== 'web_service'} onClick={add}>Attach</button></div><div className="kv" style={{ marginTop: 14 }}>{items.map((d) => <React.Fragment key={d.diskId}><dt>{d.name}</dt><dd className="mono">{d.mountPath} · {d.sizeGB}GB <button className="btn btn-sm btn-outline" onClick={() => updateHostingDisk(deploymentId, d.diskId, d).then(load)}>Sync</button></dd></React.Fragment>)}</div></div>;
 }
@@ -1040,7 +1261,7 @@ function DisksTabV2({ app, deploymentId }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const load = () => listHostingDisks(deploymentId).then(setItems).catch((e) => { setMsg(e.message || 'Could not load disks.'); setItems([]); });
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
   const add = async () => {
     setBusy('add'); setMsg('');
     try {
@@ -1078,7 +1299,7 @@ function DisksTabV2({ app, deploymentId }) {
 function DomainsTab({ deploymentId }) {
   const [items, setItems] = useState([]); const [domain, setDomain] = useState('');
   const load = () => listHostingDomains(deploymentId).then(setItems).catch(() => setItems([]));
-  useEffect(load, [deploymentId]);
+  useEffect(() => { load(); }, [deploymentId]);
   const add = async () => { await addHostingDomain(deploymentId, { domain }); setDomain(''); load(); };
   return <div className="card"><h2 style={{ marginTop: 0 }}>Custom domains</h2><div className="input-group"><input className="input mono" placeholder="example.com" value={domain} onChange={(e) => setDomain(e.target.value)} /><button className="btn btn-primary" onClick={add}>Add domain</button></div><div className="kv" style={{ marginTop: 14 }}>{items.map((d) => <React.Fragment key={d.domainId}><dt className="mono">{d.name}</dt><dd>{d.status || d.verificationStatus || 'pending'} <button className="btn btn-sm btn-outline" onClick={() => verifyHostingDomain(deploymentId, d.domainId).then(load)}>Verify</button></dd></React.Fragment>)}</div></div>;
 }
@@ -1087,7 +1308,7 @@ function LiveLogsPanel({ deploymentId, compact = false }) {
   const [lines, setLines] = useState([]); const [streamStatus, setStreamStatus] = useState(null); const [connState, setConnState] = useState('connecting'); const bottomRef = useRef(null); const seenIds = useRef(new Set());
   useEffect(() => { setLines([]); seenIds.current = new Set(); setConnState('connecting'); const es = new EventSource(getDeploymentLogStreamUrl(deploymentId)); es.addEventListener('open', () => setConnState('live')); es.addEventListener('log', (e) => { try { const log = JSON.parse(e.data); const key = log.id || `${log.source}:${log.timestamp}:${log.message}`; if (seenIds.current.has(key)) return; seenIds.current.add(key); setLines((prev) => [...prev, log]); } catch {} }); es.addEventListener('status', (e) => { try { setStreamStatus(JSON.parse(e.data)); } catch {} }); es.addEventListener('done', () => { setConnState('ended'); es.close(); }); es.addEventListener('error', () => { setConnState('error'); es.close(); }); return () => es.close(); }, [deploymentId]);
   useEffect(() => { if (!compact) bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [lines.length, compact]);
-  return <div className="card"><div className="row between" style={{ marginBottom: 10 }}><h2 style={{ margin: 0, fontSize: compact ? 14 : 18 }}>{compact ? 'Live logs' : 'Build Logs'}</h2><Badge tone={connState === 'live' ? 'success' : connState === 'error' ? 'danger' : 'muted'} dot={connState === 'live'}>{connState}</Badge></div>{streamStatus && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}><Badge tone={streamStatus.status === 'live' ? 'success' : streamStatus.status === 'failed' ? 'danger' : 'muted'} dot={false}>{streamStatus.currentStep || streamStatus.status || 'Preparing'}</Badge></div>}<div className="term" style={{ maxHeight: compact ? 220 : 520, overflowY: 'auto' }}>{lines.length === 0 && <div><span className="dim">No log lines yet.</span></div>}{lines.map((log, i) => <div key={log.id || i} style={{ display: 'flex', gap: 8, lineHeight: 1.5 }}><span className="ts" style={{ flexShrink: 0 }}>{formatTime(log.timestamp || log.createdAt)}</span><span className="dim" style={{ flexShrink: 0 }}>[{log.source === 'render' ? 'render' : 'sys'}]</span><span className={log.level === 'error' ? 'err' : log.level === 'warn' ? 'warn' : log.source === 'render' ? '' : 'dim'}>{log.message || log.msg}</span></div>)}<div ref={bottomRef} /></div></div>;
+  return <div className="card"><div className="row between" style={{ marginBottom: 10 }}><h2 style={{ margin: 0, fontSize: compact ? 14 : 18 }}>{compact ? 'Live logs' : 'Build Logs'}</h2><Badge tone={connState === 'live' ? 'success' : connState === 'error' ? 'danger' : 'muted'} dot={connState === 'live'}>{connState}</Badge></div>{streamStatus && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}><Badge tone={streamStatus.status === 'live' ? 'success' : streamStatus.status === 'failed' ? 'danger' : 'muted'} dot={false}>{streamStatus.currentStep || streamStatus.status || 'Preparing'}</Badge></div>}<div className="term" style={{ maxHeight: compact ? 220 : 520, overflowY: 'auto' }}>{lines.length === 0 && <div><span className="dim">No log lines yet.</span></div>}{lines.map((log, i) => <div key={log.id || i} style={{ display: 'flex', gap: 8, lineHeight: 1.5 }}><span className="ts" style={{ flexShrink: 0 }}>{formatTime(log.timestamp || log.createdAt)}</span><span className="dim" style={{ flexShrink: 0 }}>[build]</span><span className={log.level === 'error' ? 'err' : log.level === 'warn' ? 'warn' : log.source === 'render' ? '' : 'dim'}>{log.message || log.msg}</span></div>)}<div ref={bottomRef} /></div></div>;
 }
 
 function hoursRemaining(dueAt) {

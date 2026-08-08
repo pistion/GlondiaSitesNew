@@ -7,8 +7,8 @@
  *
  * Behaviour:
  *   - Unknown deployment → pass through (the handler returns its own 404).
- *   - Imported/pre-existing services (platformDeployed === false) or records
- *     with no owner → pass through (legacy/unowned, not user-scoped).
+ *   - Imported/pre-existing services or records with no owner → 404 for
+ *     customers. They belong to the provider/master account, not the client.
  *   - Owned by someone else → 403.
  */
 import { readHostingStore } from '../services/hostingStore.js';
@@ -22,8 +22,15 @@ export async function deploymentOwnership(req, res, next, deploymentId) {
       (d) => d.deploymentId === deploymentId || d.id === deploymentId || d.renderServiceId === deploymentId,
     );
 
-    // Unknown or unowned/imported records are not user-scoped here.
-    if (!deployment || deployment.platformDeployed === false || !deployment.userId) return next();
+    if (!deployment) return next();
+
+    if (deployment.platformDeployed === false || !deployment.userId) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Hosting service not found.' },
+        requestId: req.id,
+      });
+    }
 
     if (deployment.userId !== req.user?.id) {
       return res.status(403).json({

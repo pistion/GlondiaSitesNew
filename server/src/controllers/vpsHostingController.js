@@ -1,4 +1,4 @@
-import * as vultr from '../services/vultrApiService.js';
+import * as catalog from '../services/vpsCatalogService.js';
 import * as pricing from '../services/vpsPricingService.js';
 import * as paypal from '../services/paypalBillingService.js';
 import * as svc from '../services/vpsHostingService.js';
@@ -38,13 +38,18 @@ function wrap(fn) {
 export const getSettings = (req, res) => res.json(svc.getSettings());
 
 export const listRegions = wrap(async (req, res) =>
-  res.json(await vultr.listRegions()));
+  res.json(await catalog.listCachedRegions()));
 
-export const listPlans = wrap(async (req, res) =>
-  res.json(await vultr.listPlans(req.query.type)));
+export const listPlans = wrap(async (req, res) => {
+  const plans = await catalog.listCachedPlans(req.query.type, {
+    region: req.query.region,
+    curated: String(req.query.curated || '').toLowerCase() === 'true',
+  });
+  res.json(plans);
+});
 
 export const listOs = wrap(async (req, res) =>
-  res.json(await vultr.listOs()));
+  res.json(await catalog.listCachedOperatingSystems()));
 
 export const quote = wrap(async (req, res) => {
   const { region, plan, osId } = req.body || {};
@@ -87,8 +92,16 @@ export const getService = wrap(async (req, res) => {
   res.json(await svc.getService(req.params.id, organizationId));
 });
 
+export const getServiceSummary = wrap(async (req, res) => {
+  res.json(await svc.getServiceSummary(req.params.id, extractActor(req)));
+});
+
 export const getServiceCredentials = wrap(async (req, res) => {
   res.json(await svc.getServiceCredentials(req.params.id, extractActor(req)));
+});
+
+export const updateServiceSettings = wrap(async (req, res) => {
+  res.json(await svc.updateServiceSettings(req.params.id, extractActor(req), req.body));
 });
 
 export const startService = wrap(async (req, res) => {
@@ -118,6 +131,10 @@ export const listSshKeys = wrap(async (req, res) => {
   res.json(await svc.listSshKeys(organizationId));
 });
 
+export const createSshKey = wrap(async (req, res) => {
+  res.status(201).json(await svc.createSshKey(extractActor(req), req.body));
+});
+
 export const deleteSshKey = wrap(async (req, res) => {
   await svc.deleteSshKey(req.params.keyId, extractActor(req));
   res.json({ ok: true });
@@ -135,6 +152,10 @@ export const getBandwidth = wrap(async (req, res) => {
 export const listSnapshots = wrap(async (req, res) => {
   const { organizationId } = extractActor(req);
   res.json(await svc.listSnapshots(organizationId));
+});
+
+export const listServiceSnapshots = wrap(async (req, res) => {
+  res.json(await svc.listServiceSnapshots(req.params.id, extractActor(req)));
 });
 
 export const createSnapshot = wrap(async (req, res) => {

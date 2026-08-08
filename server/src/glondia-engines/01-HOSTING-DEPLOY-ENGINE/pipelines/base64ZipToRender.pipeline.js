@@ -7,10 +7,12 @@ import { join, resolve } from 'node:path';
 import AdmZip from 'adm-zip';
 import { makeId, mutateHostingStore, nowIso } from '../../../services/hostingStore.js';
 import renderApiService from '../../../services/renderApiService.js';
+import { createHostingService } from '../../../services/hostingProvisioningService.js';
 import { publishGeneratedSiteToGitHub, resolveGitHubPublisherToken, parseGitHubRepoUrl } from '../03-GITHUB-SOURCE-MOUNTAIN/generatedSitesRepoPublisher.stage.js';
 import { publishDirectoryToTemporaryRepo, shouldUseTemporaryRepo } from '../03-GITHUB-SOURCE-MOUNTAIN/temporaryRepoManager.stage.js';
 import { detectEnvHints } from '../02-UNZIP-AND-DETECT-MOUNTAIN/envHintDetector.stage.js';
 import { resolveDeployMode } from '../02-UNZIP-AND-DETECT-MOUNTAIN/deployModeResolver.stage.js';
+import { getProviderCapabilities } from '../00-SHARED/hostingProviderResolver.js';
 
 // ── Provider constants ──────────────────────────────────────────────────────
 // ZIP uploads are website/app hosting → always Render.
@@ -166,6 +168,7 @@ function resolveRenderSourceRepo(input = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function getZipDeployConfigStatus() {
+  const capabilities = getProviderCapabilities();
   const renderApiConfigured = renderApiService.configured();
   const sourceRepo = (process.env.RENDER_GENERATED_SITES_REPO_URL || process.env.GENERATED_SITES_REPO_URL || '').trim();
   const renderSourceRepoConfigured = Boolean(sourceRepo);
@@ -178,7 +181,12 @@ export function getZipDeployConfigStatus() {
   if (!githubPublisherConfigured) missing.push('GITHUB_GENERATED_SITES_TOKEN');
 
   return {
-    provider: HOSTING_PROVIDER,
+    provider: capabilities.uploadProvider || HOSTING_PROVIDER,
+    providerMode: capabilities.mode,
+    uploadProvider: capabilities.uploadProvider,
+    domainProvider: capabilities.domainProvider,
+    uploadProviderReason: capabilities.uploadProviderReason,
+    providers: capabilities.providers,
     renderApiConfigured,
     renderSourceRepoConfigured,
     githubPublisherConfigured,
@@ -338,7 +346,14 @@ export async function deployZipSite(input = {}) {
     }
   }
 
-  // 7. Render handoff — create service from GitHub repo, then trigger deploy
+  // 7. DB-first provisioning + Render handoff.
+  //    The canonical WebHostingService record (id === deploymentId) and a
+  //    ServiceAccess row are recorded PENDING before any provider call, via
+  //    hostingProvisioningService.createHostingService. The Render create +
+  //    trigger is wrapped as the injected provider function — this is the ONLY
+  //    place this pipeline talks to Render. The hostingStore write further down
+  //    is a transitional MIRROR of that authoritative DB row.
+  const organizationId = input.organizationId || input.clientId || userId;
   let renderServiceId = makeId('render_svc_pending');
   let renderDeployId = makeId('render_deploy_pending');
   let render = { configured: renderApiService.configured(), attempted: false, skippedReason: null };
@@ -348,64 +363,122 @@ export async function deployZipSite(input = {}) {
   let currentStep = 'ZIP extracted and stored';
   let liveUrl = `https://${finalSlug}.onrender.com`;
   let errorMessage = null;
+  let dbRecord = null;
+  let dbSyncError = null;
 
-  if (!renderApiService.configured()) {
-    render.skippedReason = 'Render API credentials are missing. Set RENDER_API_KEY and RENDER_OWNER_ID.';
-  } else if (!activeSourceRepo) {
-    render.skippedReason = 'Missing source repository URL. Set RENDER_GENERATED_SITES_REPO_URL in environment or enter a repository URL in the deploy form.';
-  } else {
-    // Attempt Render deploy regardless of GitHub publish outcome.
-    // If GitHub push failed, Render will build from the existing repo content.
+  const renderSkippedReason = !renderApiService.configured()
+    ? 'Render API credentials are missing. Set RENDER_API_KEY and RENDER_OWNER_ID.'
+    : !activeSourceRepo
+      ? 'Missing source repository URL. Set RENDER_GENERATED_SITES_REPO_URL in environment or enter a repository URL in the deploy form.'
+      : null;
+
+  // Injected provider function — reports `skipped` when Render is not configured
+  // (keeps the canonical row pending); only a createService failure is a real
+  // provider failure (a deploy-trigger failure leaves the created service live).
+  const providerCreate = async () => {
+    if (renderSkippedReason) {
+      render.skippedReason = renderSkippedReason;
+      return { skipped: true, reason: renderSkippedReason, status: 'prepared' };
+    }
     if (githubPublish.errors?.length) {
       console.warn('[zip-deploy] GitHub publish had errors — proceeding to Render with existing repo content.');
     }
+    console.log(`[zip-deploy] Starting Render handoff for ${finalSlug}...`);
+    render.attempted = true;
+    const serviceResponse = await renderApiService.createService({
+      // ── Identity ─────────────────────────────────────────────────────
+      serviceName: finalSlug,
+      serviceType,
+      // ── Infrastructure ───────────────────────────────────────────────
+      // Launch-first rule: a user ZIP upload always launches on the free plan.
+      // The trusted intent — not raw `plan` — is what the payload builder honours.
+      renderPlanIntent: 'trial_free',
+      plan,
+      region: region || undefined,
+      // ── Source ───────────────────────────────────────────────────────
+      repoUrl: activeSourceRepo,
+      branch: activeBranch,
+      // rootDirectory must match targetRoot so Render cds into the right
+      // subdirectory and finds glondia-render-build.sh.
+      rootDirectory: activeTargetRoot,
+      sourceReference: activeSourceRepo,
+      framework: detected.framework,
+      // ── Build / runtime ──────────────────────────────────────────────
+      buildCommand,
+      outputDirectory: publishDirectory,
+      startCommand: startCommand || undefined,
+      runtime: runtime || (detected.detectedServiceType === 'web_service' ? 'node' : undefined),
+      healthCheckPath: healthCheckPath || undefined,
+      pullRequestPreviewsEnabled,
+      // ── Environment variables (user-provided + GLONDIA_SITE_SLUG) ────
+      envVars: envVars.length ? envVars : undefined,
+      // ── Persistent disk (web services only) ──────────────────────────
+      disk: disk || undefined,
+      // Fallback env var — root dispatcher reads this if rootDir is dropped
+      siteSlug: finalSlug,
+    });
+    const svcId = serviceResponse?.service?.id || serviceResponse?.id || renderServiceId;
+    renderServiceId = svcId;
+    render.serviceResponse = serviceResponse;
+
+    // A deploy-trigger failure must NOT fail provisioning — the service already
+    // exists on Render (and usually auto-deploys). Record what we can and move on.
+    let depId = null;
     try {
-      console.log(`[zip-deploy] Starting Render handoff for ${finalSlug}...`);
-      render.attempted = true;
-      const serviceResponse = await renderApiService.createService({
-        // ── Identity ─────────────────────────────────────────────────────
-        serviceName: finalSlug,
-        serviceType,
-        // ── Infrastructure ───────────────────────────────────────────────
-        // Launch-first rule: a user ZIP upload always launches on the free plan.
-        // The trusted intent — not raw `plan` — is what the payload builder honours.
-        renderPlanIntent: 'trial_free',
-        plan,
-        region: region || undefined,
-        // ── Source ───────────────────────────────────────────────────────
-        repoUrl: activeSourceRepo,
-        branch: activeBranch,
-        // rootDirectory must match targetRoot so Render cds into the right
-        // subdirectory and finds glondia-render-build.sh.
-        rootDirectory: activeTargetRoot,
-        sourceReference: activeSourceRepo,
-        framework: detected.framework,
-        // ── Build / runtime ──────────────────────────────────────────────
-        buildCommand,
-        outputDirectory: publishDirectory,
-        startCommand: startCommand || undefined,
-        runtime: runtime || (detected.detectedServiceType === 'web_service' ? 'node' : undefined),
-        healthCheckPath: healthCheckPath || undefined,
-        pullRequestPreviewsEnabled,
-        // ── Environment variables (user-provided + GLONDIA_SITE_SLUG) ────
-        envVars: envVars.length ? envVars : undefined,
-        // ── Persistent disk (web services only) ──────────────────────────
-        disk: disk || undefined,
-        // Fallback env var — root dispatcher reads this if rootDir is dropped
-        siteSlug: finalSlug,
-      });
-      renderServiceId = serviceResponse?.service?.id || serviceResponse?.id || renderServiceId;
-      const deployResponse = await renderApiService.triggerDeploy(renderServiceId, { deployMode: 'build_and_deploy' });
-      renderDeployId = deployResponse?.deploy?.id || deployResponse?.id || renderDeployId;
+      const deployResponse = await renderApiService.triggerDeploy(svcId, { deployMode: 'build_and_deploy' });
+      depId = deployResponse?.deploy?.id || deployResponse?.id || null;
       providerStatus = deployResponse?.deploy?.status || deployResponse?.status || 'accepted';
-      status = renderDeployId ? 'building' : 'preparing';
-      buildStatus = renderDeployId ? 'queued' : 'accepted';
-      currentStep = renderDeployId ? 'Queued in Render' : 'Sent to Render';
-      liveUrl = serviceResponse?.service?.serviceDetails?.url || serviceResponse?.service?.url || serviceResponse?.url || liveUrl;
-      render.serviceResponse = serviceResponse;
       render.deployResponse = deployResponse;
-      console.log(`[zip-deploy] Render deploy ${renderDeployId} started`);
-    } catch (error) {
+    } catch (triggerErr) {
+      providerStatus = 'created_no_trigger';
+      render.deployError = { message: triggerErr.message, status: triggerErr.status || null };
+      console.warn(`[zip-deploy] triggerDeploy failed (service created): ${triggerErr.message}`);
+    }
+    renderDeployId = depId || renderDeployId;
+    const url = serviceResponse?.service?.serviceDetails?.url || serviceResponse?.service?.url || serviceResponse?.url || liveUrl;
+    liveUrl = url;
+    console.log(`[zip-deploy] Render deploy ${renderDeployId} started`);
+    return {
+      providerServiceId: svcId,
+      url,
+      status: depId ? 'building' : 'preparing',
+      metadata: { renderServiceId: svcId, renderDeployId: depId, providerStatus, sourceType: 'uploaded-zip-source-artifact' },
+      raw: { serviceResponse: render.serviceResponse, deployResponse: render.deployResponse || null },
+    };
+  };
+
+  try {
+    dbRecord = await createHostingService(
+      {
+        id: deploymentId,
+        name: siteName,
+        // DB slug is internal (display uses name); keep it unique per org.
+        slug: `${finalSlug}-${String(deploymentId).replace(/[^a-z0-9]/gi, '').slice(-6)}`,
+        serviceType: serviceType === 'web_service' ? 'web_service' : 'static_site',
+        plan,
+        region: region || null,
+        url: liveUrl,
+        checkoutOrderId: null,
+        totalPriceCents: 0,
+        currency: input.priceCurrency || 'USD',
+        metadata: {
+          source: 'zip-upload',
+          sourceReference: fileName,
+          uploadId,
+          siteName,
+          finalSlug,
+          renderServiceName: finalSlug,
+        },
+      },
+      { organizationId, userId },
+      { paid: false },
+      { providerCreate },
+    );
+  } catch (error) {
+    if (render.attempted) {
+      // Render create failed → createHostingService already marked the canonical
+      // row failed (visible failed row + cancelled access). Preserve the
+      // pipeline's non-fatal response shape for the store mirror + response.
       providerStatus = 'handoff_failed';
       status = 'deployed_unverified';
       buildStatus = 'uploaded';
@@ -413,7 +486,20 @@ export async function deployZipSite(input = {}) {
       errorMessage = error.message || 'Render handoff failed.';
       render.error = { message: error.message, status: error.status, details: error.details || null };
       console.log(`[zip-deploy] Render handoff failed: ${errorMessage}`);
+    } else {
+      // Pending DB stage failed BEFORE any provider call — never block the
+      // deploy; continue store-only and flag for repair/backfill.
+      dbSyncError = error.message;
+      console.error(`[zip-deploy] Canonical DB record creation failed (continuing store-only): ${error.message}`);
     }
+  }
+
+  // Map the canonical record's outcome onto the pipeline's status vars.
+  if (dbRecord && !renderSkippedReason) {
+    const started = renderDeployId && !String(renderDeployId).includes('_pending');
+    status = started ? 'building' : 'preparing';
+    buildStatus = started ? 'queued' : 'accepted';
+    currentStep = started ? 'Queued in Render' : 'Sent to Render';
   }
 
   if (render.skippedReason) {
@@ -468,7 +554,16 @@ export async function deployZipSite(input = {}) {
       id: deploymentId,
       deploymentId,
       userId,
+      organizationId,
       platformDeployed: true,
+      // Transitional mirror of the canonical WebHostingService row (same id).
+      // The DB row is authoritative; this JSON copy is a fallback/cache only and
+      // is safe to drop once every consumer reads the DB.
+      legacyMirror: true,
+      mirrorOf: 'web_hosting_service',
+      canonicalServiceId: deploymentId,
+      dbBacked: Boolean(dbRecord),
+      dbSyncError: dbSyncError || null,
       siteId: uploadId,
       serviceName: finalSlug,
       siteName,

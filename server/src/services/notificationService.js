@@ -17,6 +17,11 @@ import { prisma } from './db.js';
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 30;
 const VALID_AUDIENCE = new Set(['user', 'admin', 'all']);
+const CLIENT_SAFE_PATHS = [
+  /^\/dashboard(?:\/(?:billing|hosting|support|tickets|account|settings|projects|vps-services|cloud-servers)(?:[/?#].*)?)?$/i,
+  /^\/client\/[^/]+\/(?:billing|hosting|support|tickets|account|settings|projects|vps-services|cloud-servers)(?:[/?#].*)?$/i,
+  /^#(?:support|tickets|billing|hosting)$/i,
+];
 
 function safeParse(text) {
   try { return JSON.parse(text || '{}'); } catch { return {}; }
@@ -27,13 +32,15 @@ function dbUserId(userId) {
   return userId && userId !== 'local-user' ? userId : null;
 }
 
-function view(n) {
+function view(n, user = null) {
+  const isAdmin = user?.role === 'admin';
+  const actionUrl = isAdmin ? sanitizeActionUrl(n.actionUrl, n.audience) : null;
   return {
     id: n.id,
     type: n.type,
     title: n.title,
     message: n.message,
-    actionUrl: n.actionUrl || null,
+    actionUrl,
     entityType: n.entityType || null,
     entityId: n.entityId || null,
     audience: n.audience,
@@ -42,6 +49,46 @@ function view(n) {
     read: Boolean(n.readAt),
     createdAt: n.createdAt,
   };
+}
+
+function normalizeActionUrl(value) {
+  const raw = value ? String(value).trim().slice(0, 500) : '';
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch {
+      return null;
+    }
+  }
+  if (raw.startsWith('/')) return raw.replace(/\/{2,}/g, '/');
+  if (raw.startsWith('#')) return raw;
+  return null;
+}
+
+function isAdminActionUrl(url) {
+  const normalized = normalizeActionUrl(url);
+  if (!normalized) return false;
+  const lower = normalized.toLowerCase();
+  return lower.startsWith('/admin')
+    || lower.startsWith('/api/admin')
+    || lower === '/dashboard#tickets'
+    || lower.startsWith('/dashboard/admin')
+    || lower.includes('admin-dashboard');
+}
+
+function isClientSafeActionUrl(url) {
+  const normalized = normalizeActionUrl(url);
+  return Boolean(normalized && CLIENT_SAFE_PATHS.some((pattern) => pattern.test(normalized)));
+}
+
+export function sanitizeActionUrl(actionUrl, audience = 'user') {
+  const normalized = normalizeActionUrl(actionUrl);
+  if (!normalized) return null;
+  if (audience === 'admin') return normalized;
+  if (isAdminActionUrl(normalized)) return null;
+  return isClientSafeActionUrl(normalized) ? normalized : null;
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
@@ -64,6 +111,7 @@ export async function createNotification({
   try {
     if (!title || !message) return null;
     const aud = VALID_AUDIENCE.has(String(audience)) ? String(audience) : 'user';
+    const safeActionUrl = sanitizeActionUrl(actionUrl, aud);
     return await prisma.notification.create({
       data: {
         userId: dbUserId(userId),
@@ -71,7 +119,7 @@ export async function createNotification({
         type: String(type || 'info'),
         title: String(title).slice(0, 200),
         message: String(message).slice(0, 1000),
-        actionUrl: actionUrl ? String(actionUrl).slice(0, 500) : null,
+        actionUrl: safeActionUrl,
         entityType: entityType ? String(entityType).slice(0, 80) : null,
         entityId: entityId ? String(entityId).slice(0, 120) : null,
         metadata: JSON.stringify(metadata || {}),
@@ -121,8 +169,12 @@ function visibilityWhere(user) {
   const id = dbUserId(user?.id);
   const isAdmin = user?.role === 'admin';
   const or = [{ audience: 'all' }];
-  if (id) or.push({ userId: id });
-  if (isAdmin) or.push({ audience: 'admin' });
+  if (isAdmin) {
+    if (id) or.push({ userId: id });
+    or.push({ audience: 'admin' });
+  } else if (id) {
+    or.push({ userId: id, audience: { not: 'admin' } });
+  }
   return { deletedAt: null, OR: or };
 }
 
@@ -139,7 +191,7 @@ export async function listNotifications({ user, unreadOnly = false, limit = DEFA
     });
     const hasMore = rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
-    return { items: page.map(view), nextCursor: hasMore ? page[page.length - 1].id : null };
+    return { items: page.map((row) => view(row, user)), nextCursor: hasMore ? page[page.length - 1].id : null };
   } catch (err) {
     console.error('[notifications] list failed:', err.message);
     return { items: [], nextCursor: null };

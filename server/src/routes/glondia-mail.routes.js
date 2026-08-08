@@ -23,7 +23,10 @@ router.post('/logout', glondiaMailController.logout);
 router.get('/session', glondiaMailController.session);
 router.get('/folders', glondiaMailController.folders);
 router.get('/messages', glondiaMailController.messages);
+router.get('/messages/:id/attachments/:attachmentId', glondiaMailController.attachment);
 router.get('/messages/:id', glondiaMailController.message);
+router.patch('/messages/:id', glondiaMailController.updateMessage);
+router.post('/messages/:id/move', glondiaMailController.moveMessage);
 router.post('/send', glondiaMailController.send);
 
 export default router;

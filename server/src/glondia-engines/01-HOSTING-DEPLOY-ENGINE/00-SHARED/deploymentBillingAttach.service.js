@@ -44,16 +44,16 @@ export function buildBillingSkippedResult(reason = 'deployment_not_queued') {
  *
  * @returns {{ status, message } | { skipped, reason, message }}
  */
-export function queueDeploymentBillingAttach({ deployment, user = {}, kind = 'deployment', billingTierId = null }) {
+export function queueDeploymentBillingAttach({ deployment, user = {}, kind = 'deployment' }) {
   if (!shouldAttachDeploymentBilling(deployment)) {
     return buildBillingSkippedResult();
   }
 
   setImmediate(async () => {
     try {
-      await addDeploymentLog(deployment.deploymentId, 'Billing attach queued after free-tier Render handoff.', 'info');
-      const summary = await createDeploymentOrder({ deployment, user, kind, billingTierId });
-      await addDeploymentLog(deployment.deploymentId, `Billing attached (${summary?.billingTierId || 'tier'}).`, 'ok');
+      await addDeploymentLog(deployment.deploymentId, 'Usage billing registration queued after provider handoff.', 'info');
+      const summary = await createDeploymentOrder({ deployment, user, kind });
+      await addDeploymentLog(deployment.deploymentId, `Billing status: ${summary?.status || 'metering'}.`, 'ok');
     } catch (error) {
       console.error('[billing] background attach failed:', error.message);
       await recordBackgroundBillingFailure({ deployment, user, kind, error });
@@ -62,7 +62,7 @@ export function queueDeploymentBillingAttach({ deployment, user = {}, kind = 'de
 
   return {
     status: 'billing_pending',
-    message: 'Your site is launching on free hosting. Billing will be prepared in the background for the 12-hour trial window.',
+    message: 'Usage billing is being registered in the background.',
   };
 }
 

@@ -3,6 +3,12 @@
  */
 import { liveApiRequest } from '../api.js';
 import { authFetch } from './auth.js';
+import { getActiveServiceSandbox } from '../features/sandbox/sandboxState.js';
+
+function paymentSandbox() {
+  const sandbox = getActiveServiceSandbox();
+  return sandbox?.service === 'billing' ? sandbox : null;
+}
 
 function liveApiUrl(path) {
   const base = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
@@ -10,27 +16,25 @@ function liveApiUrl(path) {
 }
 
 /** Fetch a single checkout order (owner only) with its receipts. */
-export const getPaymentOrder = (orderId) => liveApiRequest(`/payments/orders/${encodeURIComponent(orderId)}`);
+export const getPaymentOrder = (orderId) => paymentSandbox()
+  ? Promise.resolve({ id: orderId, status: 'pending', currency: 'USD', totalAmountCents: 500, sandbox: true })
+  : liveApiRequest(`/payments/orders/${encodeURIComponent(orderId)}`);
 // Backward-compatible alias.
 export const getOrder = getPaymentOrder;
 
-/** Launch pricing tiers + promo availability for the deploy tier selector. */
-export const getDeploymentPricing = () => liveApiRequest('/payments/pricing');
+/** Per-user billing summary: pricing, orders, and deployments. */
+export const getBillingSummary = () => paymentSandbox()
+  ? Promise.resolve({ orders: [], deployments: [], paymentMethods: [], sandbox: true })
+  : liveApiRequest('/payments/billing-summary');
 
-/** Per-user billing summary: promo status, pricing, orders, deployments. */
-export const getBillingSummary = () => liveApiRequest('/payments/billing-summary');
+/** Public PayPal client/settings snapshot; secrets never leave the server. */
+export const getPayPalClientSettings = () => paymentSandbox()
+  ? Promise.resolve({ configured: true, sandbox: true, clientId: 'sandbox' })
+  : liveApiRequest('/payments/paypal-client');
 
-/** Apply/change the billing tier (promo_50 | standard_200) on a pending order. */
-export const applyDeploymentOrderTier = (orderId, billingTierId) =>
-  liveApiRequest(`/payments/deployment-orders/${encodeURIComponent(orderId)}/apply-tier`, {
+export const createDeploymentRenewalOrder = (deploymentId) =>
+  paymentSandbox() ? Promise.resolve({ id: 'sandbox-renewal-order', deploymentId, sandbox: true }) : liveApiRequest(`/payments/deployments/${encodeURIComponent(deploymentId)}/renew`, {
     method: 'POST',
-    body: { billingTierId },
-  });
-
-export const createDeploymentRenewalOrder = (deploymentId, billingTierId = null) =>
-  liveApiRequest(`/payments/deployments/${encodeURIComponent(deploymentId)}/renew`, {
-    method: 'POST',
-    body: billingTierId ? { billingTierId } : {},
   });
 
 /**
@@ -39,6 +43,7 @@ export const createDeploymentRenewalOrder = (deploymentId, billingTierId = null)
  * Also accepts the legacy form uploadManualReceipt(file, { checkoutOrderId, note }).
  */
 export async function uploadManualReceipt(arg, maybeOpts) {
+  if (paymentSandbox()) return { id: 'sandbox-receipt', status: 'payment_uploaded', sandbox: true };
   const isFileFirst = arg && typeof arg === 'object' && (typeof File !== 'undefined' ? arg instanceof File : arg.name && arg.size != null);
   const { checkoutOrderId, file, note } = isFileFirst
     ? { file: arg, ...(maybeOpts || {}) }
@@ -72,12 +77,41 @@ export async function uploadManualReceipt(arg, maybeOpts) {
 
 /** Start a PayPal (card via PayPal) payment for a deployment order. Returns { approvalUrl, paypalOrderId }. */
 export const createDeploymentPaypalOrder = (checkoutOrderId) =>
-  liveApiRequest('/payments/paypal/orders', { method: 'POST', body: { checkoutOrderId } });
+  paymentSandbox()
+    ? Promise.resolve({ paypalOrderId: 'sandbox-paypal-order', approvalUrl: '#sandbox-paypal', checkoutOrderId, sandbox: true })
+    : liveApiRequest('/payments/paypal/orders', { method: 'POST', body: { checkoutOrderId } });
 // Backward-compatible alias.
 export const createPaypalOrder = createDeploymentPaypalOrder;
 
 /** Capture a PayPal order after approval; marks the order + deployment paid. */
 export const captureDeploymentPaypalOrder = (paypalOrderId) =>
-  liveApiRequest(`/payments/paypal/orders/${encodeURIComponent(paypalOrderId)}/capture`, { method: 'POST' });
+  paymentSandbox()
+    ? Promise.resolve({ paypalOrderId, status: 'paid', sandbox: true })
+    : liveApiRequest(`/payments/paypal/orders/${encodeURIComponent(paypalOrderId)}/capture`, { method: 'POST' });
 // Backward-compatible alias.
 export const capturePaypalOrder = captureDeploymentPaypalOrder;
+
+/** Saved PayPal/card methods vaulted by PayPal (display-safe metadata only). */
+export const listPaymentMethods = () => paymentSandbox() ? Promise.resolve([]) : liveApiRequest('/payments/payment-methods');
+
+export const setDefaultPaymentMethod = (paymentMethodId) =>
+  paymentSandbox() ? Promise.resolve({ ok: true, paymentMethodId, sandbox: true }) : liveApiRequest(`/payments/payment-methods/${encodeURIComponent(paymentMethodId)}/default`, { method: 'POST' });
+
+export const removePaymentMethod = (paymentMethodId) =>
+  paymentSandbox() ? Promise.resolve({ ok: true, paymentMethodId, sandbox: true }) : liveApiRequest(`/payments/payment-methods/${encodeURIComponent(paymentMethodId)}`, { method: 'DELETE' });
+
+export const createPayPalVaultSetup = (input = {}) =>
+  paymentSandbox() ? Promise.resolve({ setupTokenId: 'sandbox-vault-token', input, sandbox: true }) : liveApiRequest('/payments/payment-methods/paypal/setup', { method: 'POST', body: input });
+
+export const completePayPalVaultSetup = (setupTokenId) =>
+  paymentSandbox() ? Promise.resolve({ ok: true, setupTokenId, sandbox: true }) : liveApiRequest('/payments/payment-methods/paypal/complete', {
+    method: 'POST',
+    body: { setupTokenId },
+  });
+
+/** Charge a deployment order using the default or selected saved PayPal vault token. */
+export const payDeploymentOrderWithSavedMethod = (orderId, paymentMethodId = null) =>
+  paymentSandbox() ? Promise.resolve({ orderId, paymentMethodId, status: 'paid', sandbox: true }) : liveApiRequest(`/payments/deployment-orders/${encodeURIComponent(orderId)}/pay-saved-method`, {
+    method: 'POST',
+    body: paymentMethodId ? { paymentMethodId } : {},
+  });
